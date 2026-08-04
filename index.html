@@ -1079,6 +1079,16 @@ async function saveCustomerSnapshot(label, parsed, periodDate) {
         label, periodDate: periodDate || todayISO(), ...parsed, uploadedAtTs: firebase.firestore.FieldValue.serverTimestamp(),
     });
 }
+async function deleteInventorySnapshot(id) {
+    await db.collection("inventorySnapshots").doc(id).delete();
+}
+async function deleteCustomerSnapshot(id) {
+    await db.collection("customerSnapshots").doc(id).delete();
+}
+// Xoá sạch toàn bộ 1 doc cấu hình dạng key-value (Level nhân viên, DMHH, Hệ số, Giới hạn, Liều dùng...)
+async function clearConfigDoc(docId) {
+    await db.collection("config").doc(docId).set({});
+}
 // ---------- small UI atoms ----------
 function LabelTag({ children, tone }) {
     const c = SEGMENT_COLOR[tone] || SEGMENT_COLOR["Chưa phân loại"];
@@ -4367,6 +4377,76 @@ function PromoView({ shopConfig }) {
             : React.createElement(PromoManualView, { key: "view", shopConfig: shopConfig }),
     ]);
 }
+function fmtBytesApprox(n) {
+    if (n == null) return "—";
+    return fmtNum(n);
+}
+function DataManagementView() {
+    const [periods, setPeriods] = useState([]);
+    const [inventory, setInventory] = useState([]);
+    const [customers, setCustomers] = useState([]);
+    const [employeeLevels, setEmployeeLevels] = useState({});
+    const [categoryMap, setCategoryMap] = useState({});
+    const [productLimits, setProductLimits] = useState({});
+    const [chronicDosage, setChronicDosage] = useState({});
+    const [coefficients, setCoefficients] = useState({});
+    useEffect(() => {
+        const u1 = subscribePeriods(setPeriods);
+        const u2 = subscribeInventory(setInventory);
+        const u3 = subscribeCustomers(setCustomers);
+        const u4 = subscribeEmployeeLevels(setEmployeeLevels);
+        const u5 = subscribeProductCategories(setCategoryMap);
+        const u6 = subscribeProductLimits(setProductLimits);
+        const u7 = subscribeChronicDosage(setChronicDosage);
+        const u8 = subscribeProductCoefficients(setCoefficients);
+        return () => { u1(); u2(); u3(); u4(); u5(); u6(); u7(); u8(); };
+    }, []);
+
+    function fileRow(item, onDelete, extraLabel) {
+        return React.createElement("div", { key: item.id, style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: `1px solid ${COLORS.line}`, gap: 10, flexWrap: "wrap" } }, [
+            React.createElement("div", { key: "l" }, [
+                React.createElement("div", { key: "n", style: { fontWeight: 600, fontSize: 13.5 } }, item.label || item.fileName || "(không tên)"),
+                React.createElement("div", { key: "s", style: { fontSize: 12, color: COLORS.inkSoft } }, `${item.periodDate || ""}${extraLabel ? " · " + extraLabel : ""}`),
+            ]),
+            React.createElement("button", { key: "del", type: "button", onClick: () => { if (window.confirm(`Xoá "${item.label || item.fileName}"? Không thể hoàn tác.`)) onDelete(item.id); }, style: { padding: "6px 12px", background: "#fff", border: `1px solid ${COLORS.claySoft}`, color: COLORS.clay, borderRadius: 8, fontSize: 12.5, cursor: "pointer" } }, "Xoá"),
+        ]);
+    }
+    function fileListCard(title, items, onDelete, extraLabelFn) {
+        return React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20 } }, [
+            React.createElement("div", { key: "t", style: titleStyle }, `${title} (${items.length})`),
+            items.length === 0
+                ? React.createElement("div", { key: "e", style: { color: COLORS.inkSoft, fontSize: 13, padding: "10px 0" } }, "Chưa có file nào.")
+                : React.createElement("div", { key: "list" }, [...items].reverse().map((it) => fileRow(it, onDelete, extraLabelFn ? extraLabelFn(it) : null))),
+        ]);
+    }
+    function configClearRow(label, docId, map, setMap) {
+        const count = Object.keys(map || {}).length;
+        return React.createElement("div", { key: docId, style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: `1px solid ${COLORS.line}`, gap: 10, flexWrap: "wrap" } }, [
+            React.createElement("div", { key: "l" }, [
+                React.createElement("div", { key: "n", style: { fontWeight: 600, fontSize: 13.5 } }, label),
+                React.createElement("div", { key: "s", style: { fontSize: 12, color: COLORS.inkSoft } }, `${count} mục đang lưu`),
+            ]),
+            React.createElement("button", { key: "del", type: "button", disabled: count === 0, onClick: () => { if (window.confirm(`Xoá TOÀN BỘ "${label}" (${count} mục)? Không thể hoàn tác — sẽ cần tải/nhập lại từ đầu.`)) clearConfigDoc(docId); }, style: { padding: "6px 12px", background: "#fff", border: `1px solid ${COLORS.claySoft}`, color: count === 0 ? COLORS.inkSoft : COLORS.clay, borderRadius: 8, fontSize: 12.5, cursor: count === 0 ? "default" : "pointer", opacity: count === 0 ? 0.5 : 1 } }, "Xoá toàn bộ"),
+        ]);
+    }
+
+    return React.createElement(React.Fragment, null, [
+        React.createElement("h2", { key: "title", className: "pagetitle" || undefined, style: { fontFamily: "'Fraunces', serif", fontSize: 26, fontWeight: 600, marginBottom: 6 } }, "Quản lý dữ liệu đã tải lên"),
+        React.createElement("p", { key: "sub", style: { color: COLORS.inkSoft, fontSize: 13.5, marginBottom: 22 } }, "Xoá bớt các file/dữ liệu không còn cần thiết. Thao tác xoá không thể hoàn tác — các báo cáo liên quan sẽ tự cập nhật lại ngay sau khi xoá."),
+        fileListCard("Kỳ doanh thu đã tải (tab Doanh thu)", periods, deletePeriod, (p) => { var _a; return `${fmtNum(p.rowCount || 0)} dòng${((_a = p.meta) === null || _a === void 0 ? void 0 : _a.fileName) ? " · " + p.meta.fileName : ""}`; }),
+        fileListCard("File tồn kho đã tải (tab Tồn kho)", inventory, deleteInventorySnapshot, (p) => `${fmtNum(p.rowCount || 0)} dòng`),
+        fileListCard("File khách hàng đã tải (tab Khách hàng)", customers, deleteCustomerSnapshot, (p) => `${fmtNum(p.rowCount || 0)} dòng`),
+        React.createElement("div", { key: "config", style: { ...cardStyle, background: COLORS.card } }, [
+            React.createElement("div", { key: "t", style: titleStyle }, "Dữ liệu cấu hình khác"),
+            React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Các dữ liệu này được gộp dần qua nhiều lần tải/nhập, không tách riêng theo từng file — chỉ có thể xoá sạch toàn bộ rồi nhập lại, không xoá được từng lần tải riêng lẻ."),
+            configClearRow("Level nhân viên", "employeeLevels", employeeLevels, setEmployeeLevels),
+            configClearRow("Danh mục hàng hóa (Nhóm/Phân loại DMHH)", "productCategories", categoryMap, setCategoryMap),
+            configClearRow("Hệ số sản phẩm", "productCoefficients", coefficients, setCoefficients),
+            configClearRow("Giới hạn sản phẩm (cảnh báo gian lận)", "productLimits", productLimits, setProductLimits),
+            configClearRow("Liều dùng thuốc mạn tính", "chronicDosage", chronicDosage, setChronicDosage),
+        ]),
+    ]);
+}
 // ---------- Main dashboard ----------
 const TABS = [
     { id: "revenue", label: "Doanh thu" },
@@ -4375,6 +4455,7 @@ const TABS = [
     { id: "category", label: "Danh mục hàng hóa" },
     { id: "customer", label: "Khách hàng" },
     { id: "promo", label: "Khuyến mại" },
+    { id: "data", label: "Quản lý dữ liệu" },
 ];
 function Dashboard({ user }) {
     var _a;
@@ -4419,7 +4500,8 @@ function Dashboard({ user }) {
             activeTab === "employee" && React.createElement(EmployeeView, { shopConfig: shopConfig }),
             activeTab === "category" && React.createElement(CategoryView, null),
             activeTab === "customer" && React.createElement(CustomerView, { shopConfig: shopConfig }),
-            activeTab === "promo" && React.createElement(PromoView, { shopConfig: shopConfig })),
+            activeTab === "promo" && React.createElement(PromoView, { shopConfig: shopConfig }),
+            activeTab === "data" && React.createElement(DataManagementView, null)),
         showSettings && (React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 } },
             React.createElement("div", { style: { background: COLORS.card, borderRadius: 12, padding: 24, width: 420, maxHeight: "80vh", overflowY: "auto" } },
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 16 } },
