@@ -4971,19 +4971,33 @@ function PromoAutoView({ shopConfig }) {
         return rows.sort((a, b) => a.shop.localeCompare(b.shop) || (b.cost - a.cost));
     }, [periods, dedupedSkuItems, qtyByShopProductCode, billRevenueByShopProductCode]);
     // ---- Gộp báo cáo cuối cùng: Cửa hàng x Tên chương trình -> Doanh thu, Chi phí, SL sử dụng ----
+    // Lưu ý: 2 nguồn dữ liệu (dò theo tên CTKM và danh sách mã SP giảm giá) thường mô tả CÙNG 1 đợt giảm giá nhìn từ
+    // 2 góc khác nhau (dòng khuyến mại vs dòng sản phẩm), nên khi cả 2 đều có dữ liệu cho cùng 1 Cửa hàng×Chương trình,
+    // KHÔNG được cộng dồn SL/chi phí của 2 nguồn lại (sẽ bị tính trùng gấp đôi) — ưu tiên số liệu từ danh sách mã SP
+    // (chính xác theo giá gốc/giá sau giảm) khi có, chỉ dùng số liệu dò theo tên làm phần bổ sung khi mã SP không phủ hết.
     const shopProgramReport = useMemo(() => {
         const acc = {};
         for (const g of groupsByShop) {
             const key = `${g.shop}__${g.name}`;
             const cost = (costByShopProgram[`${g.shop}__${collapseWhitespace(g.name).toLowerCase()}`] || {}).discountCost || 0;
-            acc[key] = { shop: g.shop, name: g.name, qty: g.qty, revenue: g.revenue, cost };
+            // Doanh thu của chính dòng CTKM/giảm giá (revenue trên dòng đó) không phải là doanh thu đơn hàng thực —
+            // thường là 0 (tặng quà) hoặc âm (số tiền đã giảm trừ), nên chỉ giữ lại khi dương; nếu không sẽ được
+            // thay bằng doanh thu ghi nhận theo đơn hàng (từ danh sách mã SP) ở bước dưới nếu có dữ liệu khớp.
+            acc[key] = { shop: g.shop, name: g.name, qty: g.qty, revenue: g.revenue > 0 ? g.revenue : 0, cost, fromSku: false };
         }
         for (const r of skuShopBreakdown) {
             const key = `${r.shop}__${r.name}`;
-            if (!acc[key]) acc[key] = { shop: r.shop, name: r.name, qty: 0, revenue: r.revenue || 0, cost: 0 };
-            else if (!acc[key].revenue) acc[key].revenue = r.revenue || 0; // chỉ điền nếu chưa có doanh thu từ nguồn dò tên sản phẩm
-            acc[key].qty += r.qty;
-            acc[key].cost += r.cost;
+            if (!acc[key]) {
+                acc[key] = { shop: r.shop, name: r.name, qty: r.qty, revenue: r.revenue || 0, cost: r.cost, fromSku: true };
+                continue;
+            }
+            const existing = acc[key];
+            // Đã có số liệu mã SP (chính xác hơn) cho đúng Cửa hàng×Chương trình này: dùng thay thế thay vì cộng dồn
+            // với số ước tính theo tên chương trình ở trên, để tránh tính trùng 2 lần cho cùng 1 đợt giảm giá.
+            existing.qty = r.qty;
+            existing.cost = r.cost;
+            if (r.revenue) existing.revenue = r.revenue;
+            existing.fromSku = true;
         }
         return Object.values(acc).sort((a, b) => a.shop.localeCompare(b.shop) || (b.cost - a.cost) || (b.revenue - a.revenue));
     }, [groupsByShop, costByShopProgram, skuShopBreakdown]);
@@ -5156,11 +5170,18 @@ function PromoAutoView({ shopConfig }) {
         return Object.values(acc).map((g) => ({ ...g, shopCount: g.shopSet.size }))
             .sort((a, b) => (b.cost - a.cost) || (b.qty - a.qty));
     }, [shopProgramReportFiltered]);
-    const reportShopFilterBar = React.createElement("div", { key: "shopFilterBar", style: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 } }, [
+    const REPORT_SHOP_BAR_H = 34; // chiều cao ước tính của thanh nút lọc cửa hàng, dùng để xếp chồng đúng với thead sticky bên dưới
+    const reportShopFilterBar = React.createElement("div", {
+        key: "shopFilterBar",
+        style: {
+            display: "flex", flexWrap: "wrap", gap: 4, padding: "6px 6px", position: "sticky", top: 0, zIndex: 3,
+            background: COLORS.card, borderBottom: `1px solid ${COLORS.line}`,
+        },
+    }, [
         React.createElement("button", {
             key: "__ALL__", onClick: () => setReportShopFilter([]),
             style: {
-                padding: "5px 12px", borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: "pointer",
                 border: `1px solid ${reportShopFilter.length === 0 ? COLORS.pine : COLORS.line}`,
                 background: reportShopFilter.length === 0 ? COLORS.pineSoft : COLORS.card,
                 color: reportShopFilter.length === 0 ? COLORS.pine : COLORS.inkSoft,
@@ -5171,7 +5192,7 @@ function PromoAutoView({ shopConfig }) {
             return React.createElement("button", {
                 key: shop, onClick: () => toggleReportShop(shop),
                 style: {
-                    padding: "5px 12px", borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: "pointer",
                     border: `1px solid ${active ? COLORS.pine : COLORS.line}`,
                     background: active ? COLORS.pineSoft : COLORS.card,
                     color: active ? COLORS.pine : COLORS.inkSoft,
@@ -5181,21 +5202,21 @@ function PromoAutoView({ shopConfig }) {
     ]);
     const programTotalCard = programTotalReport.length > 0 ? React.createElement("div", { key: "totalWrap", style: { marginBottom: 18 } }, [
         React.createElement("div", { key: "tt", style: { fontSize: 13, fontWeight: 700, color: COLORS.ink, marginBottom: 8 } }, `Bảng tổng theo Chương trình (gộp tất cả cửa hàng đang lọc, ${programTotalReport.length} chương trình)`),
-        React.createElement("div", { key: "wrap", style: { maxHeight: 320, overflowY: "auto", border: `1px solid ${COLORS.line}`, borderRadius: 10 } },
-            React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } }, [
-                React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase", position: "sticky", top: 0, background: COLORS.card } }, [
-                    React.createElement("th", { key: "n", style: { padding: "8px" } }, "Tên chương trình"),
-                    React.createElement("th", { key: "sc", style: { padding: "8px", textAlign: "right" } }, "Số cửa hàng"),
-                    React.createElement("th", { key: "q", style: { padding: "8px", textAlign: "right" } }, "SL sử dụng"),
-                    React.createElement("th", { key: "r", style: { padding: "8px", textAlign: "right" } }, "Doanh thu ghi nhận"),
-                    React.createElement("th", { key: "c", style: { padding: "8px", textAlign: "right" } }, "Chi phí"),
+        React.createElement("div", { key: "wrap", style: { maxHeight: 260, overflowY: "auto", border: `1px solid ${COLORS.line}`, borderRadius: 10 } },
+            React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12.5 } }, [
+                React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 10.5, textTransform: "uppercase", position: "sticky", top: 0, background: COLORS.card } }, [
+                    React.createElement("th", { key: "n", style: { padding: "5px 8px" } }, "Tên chương trình"),
+                    React.createElement("th", { key: "sc", style: { padding: "5px 8px", textAlign: "right" } }, "Số cửa hàng"),
+                    React.createElement("th", { key: "q", style: { padding: "5px 8px", textAlign: "right" } }, "SL sử dụng"),
+                    React.createElement("th", { key: "r", style: { padding: "5px 8px", textAlign: "right" } }, "Doanh thu ghi nhận"),
+                    React.createElement("th", { key: "c", style: { padding: "5px 8px", textAlign: "right" } }, "Chi phí"),
                 ])),
                 React.createElement("tbody", { key: "b" }, programTotalReport.map((r, i) => React.createElement("tr", { key: i, style: { borderTop: `1px solid ${COLORS.line}` } }, [
-                    React.createElement("td", { key: "n", style: { padding: "8px", fontWeight: 600, maxWidth: 320 } }, r.name),
-                    React.createElement("td", { key: "sc", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.shopCount)),
-                    React.createElement("td", { key: "q", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.qty)),
-                    React.createElement("td", { key: "r", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.revenue)),
-                    React.createElement("td", { key: "c", style: { padding: "8px", textAlign: "right", color: r.cost > 0 ? COLORS.clay : COLORS.inkSoft, fontWeight: r.cost > 0 ? 600 : 400 } }, r.cost > 0 ? fmtVND(r.cost) : "—"),
+                    React.createElement("td", { key: "n", style: { padding: "5px 8px", fontWeight: 600, maxWidth: 320 } }, r.name),
+                    React.createElement("td", { key: "sc", style: { padding: "5px 8px", textAlign: "right" } }, fmtNum(r.shopCount)),
+                    React.createElement("td", { key: "q", style: { padding: "5px 8px", textAlign: "right" } }, fmtNum(r.qty)),
+                    React.createElement("td", { key: "r", style: { padding: "5px 8px", textAlign: "right" } }, fmtNum(r.revenue)),
+                    React.createElement("td", { key: "c", style: { padding: "5px 8px", textAlign: "right", color: r.cost > 0 ? COLORS.clay : COLORS.inkSoft, fontWeight: r.cost > 0 ? 600 : 400 } }, r.cost > 0 ? fmtVND(r.cost) : "—"),
                 ]))),
             ])),
     ]) : null;
@@ -5203,24 +5224,25 @@ function PromoAutoView({ shopConfig }) {
         React.createElement("div", { key: "t", style: titleStyle }, `Báo cáo đánh giá theo Cửa hàng × Chương trình (${shopProgramReport.length} dòng)`),
         React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Gộp từ cả 2 nguồn: dò theo tên sản phẩm (doanh thu, SL) và danh sách mã SP giảm giá (chi phí chính xác theo giá gốc/giá sau giảm nếu có tải lên). Nút lọc cửa hàng bên dưới độc lập với Bộ lọc chung ở trên."),
         programTotalCard,
-        reportShopFilterBar,
-        React.createElement("div", { key: "wrap", style: { maxHeight: 480, overflowY: "auto", border: `1px solid ${COLORS.line}`, borderRadius: 10 } },
-            React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } }, [
-                React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase", position: "sticky", top: 0, background: COLORS.card } }, [
-                    React.createElement("th", { key: "s", style: { padding: "8px" } }, "Cửa hàng"),
-                    React.createElement("th", { key: "n", style: { padding: "8px" } }, "Tên chương trình"),
-                    React.createElement("th", { key: "q", style: { padding: "8px", textAlign: "right" } }, "SL sử dụng"),
-                    React.createElement("th", { key: "r", style: { padding: "8px", textAlign: "right" } }, "Doanh thu ghi nhận"),
-                    React.createElement("th", { key: "c", style: { padding: "8px", textAlign: "right" } }, "Chi phí"),
+        React.createElement("div", { key: "wrap", style: { maxHeight: 420, overflowY: "auto", border: `1px solid ${COLORS.line}`, borderRadius: 10 } }, [
+            reportShopFilterBar,
+            React.createElement("table", { key: "tbl", style: { width: "100%", borderCollapse: "collapse", fontSize: 12.5 } }, [
+                React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 10.5, textTransform: "uppercase", position: "sticky", top: REPORT_SHOP_BAR_H, background: COLORS.card, zIndex: 2 } }, [
+                    React.createElement("th", { key: "s", style: { padding: "5px 8px" } }, "Cửa hàng"),
+                    React.createElement("th", { key: "n", style: { padding: "5px 8px" } }, "Tên chương trình"),
+                    React.createElement("th", { key: "q", style: { padding: "5px 8px", textAlign: "right" } }, "SL sử dụng"),
+                    React.createElement("th", { key: "r", style: { padding: "5px 8px", textAlign: "right" } }, "Doanh thu ghi nhận"),
+                    React.createElement("th", { key: "c", style: { padding: "5px 8px", textAlign: "right" } }, "Chi phí"),
                 ])),
                 React.createElement("tbody", { key: "b" }, shopProgramReportFiltered.map((r, i) => React.createElement("tr", { key: i, style: { borderTop: `1px solid ${COLORS.line}` } }, [
-                    React.createElement("td", { key: "s", style: { padding: "8px", fontWeight: 600 } }, r.shop),
-                    React.createElement("td", { key: "n", style: { padding: "8px", maxWidth: 320 } }, r.name),
-                    React.createElement("td", { key: "q", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.qty)),
-                    React.createElement("td", { key: "r", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.revenue)),
-                    React.createElement("td", { key: "c", style: { padding: "8px", textAlign: "right", color: r.cost > 0 ? COLORS.clay : COLORS.inkSoft, fontWeight: r.cost > 0 ? 600 : 400 } }, r.cost > 0 ? fmtVND(r.cost) : "—"),
+                    React.createElement("td", { key: "s", style: { padding: "5px 8px", fontWeight: 600 } }, r.shop),
+                    React.createElement("td", { key: "n", style: { padding: "5px 8px", maxWidth: 320 } }, r.name),
+                    React.createElement("td", { key: "q", style: { padding: "5px 8px", textAlign: "right" } }, fmtNum(r.qty)),
+                    React.createElement("td", { key: "r", style: { padding: "5px 8px", textAlign: "right" } }, fmtNum(r.revenue)),
+                    React.createElement("td", { key: "c", style: { padding: "5px 8px", textAlign: "right", color: r.cost > 0 ? COLORS.clay : COLORS.inkSoft, fontWeight: r.cost > 0 ? 600 : 400 } }, r.cost > 0 ? fmtVND(r.cost) : "—"),
                 ]))),
-            ])),
+            ]),
+        ]),
     ]) : null;
 
     let resultBlock;
