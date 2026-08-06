@@ -950,33 +950,48 @@ function exportChronicAlertsToExcel(rows, statusBadgeFn) {
     XLSX.writeFile(wb, `theo-doi-thuoc-man-tinh-${todayISO()}.xlsx`);
 }
 // ---------- Firestore data layer ----------
-// Cache các trường tổng hợp (Agg) đã tải theo periodId, tránh tải lại nếu period không đổi
+// Cache các trường tổng hợp (Agg) đã tải theo periodId + bộ trường yêu cầu, tránh tải lại nếu không đổi
 const _periodAggCache = new Map();
 function _periodVersionKey(base) {
     const ts = base.uploadedAtTs;
     if (ts && typeof ts.toMillis === "function") return String(ts.toMillis());
     return JSON.stringify({ rowCount: base.rowCount, label: base.label, periodDate: base.periodDate });
 }
-function subscribePeriods(cb) {
+// aggFields: undefined = tải tất cả (mặc định, tương thích ngược); [] = không cần Agg nào; [..] = chỉ tải đúng các trường được liệt kê
+function subscribePeriods(cb, aggFields) {
+    const fieldsKey = aggFields ? aggFields.slice().sort().join(",") : "__ALL__";
     return db.collection("periods").orderBy("periodDate", "asc").onSnapshot(async (snap) => {
         const periods = await Promise.all(snap.docs.map(async (d) => {
             const base = { id: d.id, ...d.data() };
-            const versionKey = _periodVersionKey(base);
-            const cached = _periodAggCache.get(d.id);
-            if (cached && cached.versionKey === versionKey) {
-                return { ...base, ...cached.aggregates };
+            if (aggFields && aggFields.length === 0) {
+                return base; // Component này không cần trường Agg nào
             }
-            let aggregates = {};
+            const cacheKey = `${d.id}::${fieldsKey}::${_periodVersionKey(base)}`;
+            const cached = _periodAggCache.get(cacheKey);
+            if (cached) return { ...base, ...cached };
+            const aggregates = {};
             try {
-                const aggSnap = await db.collection("periods").doc(d.id).collection("aggregates").get();
-                aggSnap.forEach((aggDoc) => {
-                    const val = aggDoc.data();
-                    aggregates[aggDoc.id] = val && "data" in val ? val.data : val;
-                });
+                if (aggFields) {
+                    await Promise.all(aggFields.map(async (f) => {
+                        try {
+                            const aggDoc = await db.collection("periods").doc(d.id).collection("aggregates").doc(f).get();
+                            if (aggDoc.exists) {
+                                const val = aggDoc.data();
+                                aggregates[f] = val && "data" in val ? val.data : val;
+                            }
+                        } catch (e) { console.error("Loi tai truong", f, "cho period", d.id, e); }
+                    }));
+                } else {
+                    const aggSnap = await db.collection("periods").doc(d.id).collection("aggregates").get();
+                    aggSnap.forEach((aggDoc) => {
+                        const val = aggDoc.data();
+                        aggregates[aggDoc.id] = val && "data" in val ? val.data : val;
+                    });
+                }
             } catch (e) {
                 console.error("Loi tai aggregates cho period", d.id, e);
             }
-            _periodAggCache.set(d.id, { versionKey, aggregates });
+            _periodAggCache.set(cacheKey, aggregates);
             return { ...base, ...aggregates };
         }));
         cb(periods);
@@ -1588,7 +1603,7 @@ function RevenueView({ shopConfig }) {
     const [deletingId, setDeletingId] = useState(null);
     useEffect(() => {
         const unsub = subscribePeriods((list) => { setPeriods(list); if (!selectedId && list.length)
-            setSelectedId(list[list.length - 1].id); });
+            setSelectedId(list[list.length - 1].id); }, ["shopAgg", "dailyShopAgg", "dailyShopCategoryAgg", "dailyShopProductAgg", "dailyProductAgg", "shopCategoryAgg", "shopProductAgg"]);
         const unsub2 = subscribeProductCoefficients(setCoefficients);
         const unsub3 = subscribeProductCategories(setCategoryMap);
         const unsub4 = subscribeInventory(setInvSnapshots);
@@ -2468,7 +2483,7 @@ function CategoryView() {
     useEffect(() => {
         const u1 = subscribeProductCategories(setCategoryMap);
         const u2 = subscribeProductCoefficients(setCoefficients);
-        const u3 = subscribePeriods(setRevPeriods);
+        const u3 = subscribePeriods(setRevPeriods, ["productAgg"]);
         const u4 = subscribeInventory(setInvSnapshots);
         return () => { u1(); u2(); u3(); u4(); };
     }, []);
@@ -2830,7 +2845,7 @@ function EmployeeView({ shopConfig }) {
     const [levelUploading, setLevelUploading] = useState(false);
     const [levelError, setLevelError] = useState(null);
     useEffect(() => {
-        const unsub = subscribePeriods(setPeriods);
+        const unsub = subscribePeriods(setPeriods, ["dailyEmployeeAgg", "employeeProductAgg"]);
         const unsub2 = subscribeProductCoefficients(setCoefficients);
         const unsub3 = subscribeEmployeeTargets(setEmployeeTargets);
         const unsub4 = subscribeEmployeeLevels(setEmployeeLevels);
@@ -3207,7 +3222,7 @@ function CustomerView({ shopConfig }) {
     useEffect(() => {
         const unsub = subscribeCustomers((list) => { setSnapshots(list); if (!selectedId && list.length)
             setSelectedId(list[list.length - 1].id); });
-        const unsub2 = subscribePeriods(setRevPeriods);
+        const unsub2 = subscribePeriods(setRevPeriods, ["customerAgg", "customerProductAgg", "dailyCustomerProductAgg", "shopAgg", "tierAgg"]);
         const unsub3 = subscribeProductLimits(setProductLimits);
         const unsub4 = subscribeProductCategories(setCategoryMap);
         const unsub5 = subscribeChronicDosage(setChronicDosage);
@@ -3867,7 +3882,7 @@ function CrossInsightsView({ shopConfig }) {
     const [categoryMap, setCategoryMap] = useState({});
     const [analysisDate, setAnalysisDate] = useState(todayISO());
     useEffect(() => {
-        const u1 = subscribePeriods(setPeriods);
+        const u1 = subscribePeriods(setPeriods, ["categoryValueAgg", "productAgg", "shopAgg"]);
         const u2 = subscribeInventory(setSnapshots);
         const u3 = subscribeCustomers(setCustomers);
         const u4 = subscribeProductCategories(setCategoryMap);
@@ -3980,7 +3995,7 @@ function PromoManualView({ shopConfig }) {
     const [periods, setPeriods] = useState([]);
     const [coefficients, setCoefficients] = useState({});
     useEffect(() => {
-        const u1 = subscribePeriods(setPeriods);
+        const u1 = subscribePeriods(setPeriods, ["dailyProductAgg", "dailyShopProductAgg", "shopAgg"]);
         const u2 = subscribeProductCoefficients(setCoefficients);
         return () => { u1(); u2(); };
     }, []);
@@ -4225,7 +4240,7 @@ function collapseWhitespace(s) {
 }
 function PromoAutoView({ shopConfig }) {
     const [periods, setPeriods] = useState([]);
-    useEffect(() => { const u = subscribePeriods(setPeriods); return () => u(); }, []);
+    useEffect(() => { const u = subscribePeriods(setPeriods, ["dailyProductNameAgg", "shopAgg"]); return () => u(); }, []);
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
     const [shopFilter, setShopFilter] = useState("__ALL__");
@@ -4418,7 +4433,7 @@ function DataManagementView() {
     const [chronicDosage, setChronicDosage] = useState({});
     const [coefficients, setCoefficients] = useState({});
     useEffect(() => {
-        const u1 = subscribePeriods(setPeriods);
+        const u1 = subscribePeriods(setPeriods, []);
         const u2 = subscribeInventory(setInventory);
         const u3 = subscribeCustomers(setCustomers);
         const u4 = subscribeEmployeeLevels(setEmployeeLevels);
