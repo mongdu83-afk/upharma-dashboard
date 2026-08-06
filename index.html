@@ -997,12 +997,32 @@ function subscribePeriods(cb, aggFields) {
         cb(periods);
     });
 }
+// Các trường nhỏ giữ trong document gốc "periods"; mọi trường khác (các mảng Agg lớn) sẽ tự động
+// được tách sang subcollection "periods/{id}/aggregates/{tenTruong}" để giữ document gốc luôn nhẹ.
+const PERIOD_SMALL_FIELDS = new Set([
+    'periodId', 'shop', 'date', 'startDate', 'endDate', 'uploadedAtTs',
+    'period', 'label', 'type', 'createdAt', 'updatedAt', 'id',
+    'periodDate', 'rowCount', 'meta'
+]);
 async function savePeriod(label, parsed, periodDate) {
-    await db.collection("periods").add({
-        label, periodDate: periodDate || todayISO(), ...parsed, uploadedAtTs: firebase.firestore.FieldValue.serverTimestamp(),
+    const allData = { label, periodDate: periodDate || todayISO(), ...parsed };
+    const mainDoc = {};
+    const aggFields = {};
+    Object.keys(allData).forEach((k) => {
+        if (PERIOD_SMALL_FIELDS.has(k)) mainDoc[k] = allData[k];
+        else aggFields[k] = allData[k];
     });
+    mainDoc.uploadedAtTs = firebase.firestore.FieldValue.serverTimestamp();
+    const ref = await db.collection("periods").add(mainDoc);
+    await Promise.all(Object.keys(aggFields).map((fieldName) => db.collection("periods").doc(ref.id).collection("aggregates").doc(fieldName).set({
+        data: aggFields[fieldName],
+        migratedAt: new Date().toISOString(),
+    })));
+    return ref;
 }
 async function deletePeriod(id) {
+    const aggSnap = await db.collection("periods").doc(id).collection("aggregates").get();
+    await Promise.all(aggSnap.docs.map((d) => d.ref.delete()));
     await db.collection("periods").doc(id).delete();
 }
 function subscribeShopConfig(cb) {
