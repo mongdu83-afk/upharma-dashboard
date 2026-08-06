@@ -89,6 +89,14 @@ function norm(s) {
     return (s !== null && s !== void 0 ? s : "").toString().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
         .replace(/đ/g, "d").replace(/Đ/g, "D").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
+// Sản phẩm được coi là "dừng" (ngừng kinh doanh) nếu Danh mục hàng hóa có cột Trạng thái ghi rõ điều đó
+function isProductStopped(code, categoryMap) {
+    const c = categoryMap && categoryMap[code];
+    if (!c || !c.trangThai)
+        return false;
+    const n = norm(c.trangThai);
+    return n.includes("dung") || n.includes("ngung") || n.includes("ngunghoatdong") || n.includes("ngungkinhdoanh");
+}
 const PROMO_NAME_HINTS = ["ctkm", "voucher", "coupon", "khuyenmai", "quatang", "tangqua", "uudai"];
 function isPromoLikeName(name) {
     const n = norm(name);
@@ -1063,13 +1071,25 @@ function exportAlertsToExcel(rows, snapshotLabel) {
     XLSX.writeFile(wb, `canh-bao-han-su-dung-${snapshotLabel}.xlsx`);
 }
 function subscribeProductCategories(cb) {
-    return db.collection("config").doc("productCategories").onSnapshot((doc) => cb(doc.exists ? doc.data() : {}));
+    return db.collection("productCategories").onSnapshot((snap) => {
+        const map = {};
+        snap.forEach((d) => { map[d.id] = d.data(); });
+        cb(map);
+    });
 }
 async function saveProductCategoryMap(map) {
-    await db.collection("config").doc("productCategories").set(map, { merge: true });
+    const entries = Object.entries(map);
+    const CHUNK = 450; // dưới giới hạn 500 ghi/batch của Firestore, chừa dư an toàn
+    for (let i = 0; i < entries.length; i += CHUNK) {
+        const batch = db.batch();
+        for (const [code, val] of entries.slice(i, i + CHUNK)) {
+            batch.set(db.collection("productCategories").doc(code), val, { merge: true });
+        }
+        await batch.commit();
+    }
 }
 async function deleteProductCategory(code) {
-    await db.collection("config").doc("productCategories").update({ [code]: firebase.firestore.FieldValue.delete() });
+    await db.collection("productCategories").doc(code).delete();
 }
 function subscribeProductLimits(cb) {
     return db.collection("config").doc("productLimits").onSnapshot((doc) => cb(doc.exists ? doc.data() : {}));
@@ -1132,23 +1152,70 @@ async function saveCategoryList(names) {
     await db.collection("config").doc("categoryList").set({ names });
 }
 function subscribeCustomers(cb) {
-    return db.collection("customerSnapshots").orderBy("periodDate", "asc").onSnapshot((snap) => {
-        cb(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    return db.collection("customerSnapshots").orderBy("periodDate", "asc").onSnapshot(async (snap) => {
+        const list = await Promise.all(snap.docs.map(async (d) => {
+            const base = { id: d.id, ...d.data() };
+            try {
+                const aggSnap = await db.collection("customerSnapshots").doc(d.id).collection("aggregates").get();
+                const extra = {};
+                aggSnap.forEach((aggDoc) => {
+                    const val = aggDoc.data();
+                    extra[aggDoc.id] = val && "data" in val ? val.data : val;
+                });
+                return { ...base, ...extra };
+            }
+            catch (e) {
+                console.error("Loi tai aggregates cho customer snapshot", d.id, e);
+                return base;
+            }
+        }));
+        cb(list);
     });
 }
+// Các trường nhỏ giữ trong document gốc; các mảng lớn (topCustomers, topByFrequency) tự tách sang
+// subcollection "customerSnapshots/{id}/aggregates/{tenTruong}" để tránh vượt giới hạn 1MB/document
+const CUSTOMER_SNAPSHOT_SMALL_FIELDS = new Set(["label", "periodDate", "uploadedAtTs", "meta", "shopAgg", "tierAgg"]);
 async function saveCustomerSnapshot(label, parsed, periodDate) {
-    await db.collection("customerSnapshots").add({
-        label, periodDate: periodDate || todayISO(), ...parsed, uploadedAtTs: firebase.firestore.FieldValue.serverTimestamp(),
+    const allData = { label, periodDate: periodDate || todayISO(), ...parsed };
+    const mainDoc = {};
+    const aggFields = {};
+    Object.keys(allData).forEach((k) => {
+        if (CUSTOMER_SNAPSHOT_SMALL_FIELDS.has(k))
+            mainDoc[k] = allData[k];
+        else
+            aggFields[k] = allData[k];
     });
+    mainDoc.uploadedAtTs = firebase.firestore.FieldValue.serverTimestamp();
+    const ref = await db.collection("customerSnapshots").add(mainDoc);
+    await Promise.all(Object.keys(aggFields).map((fieldName) => db.collection("customerSnapshots").doc(ref.id).collection("aggregates").doc(fieldName).set({
+        data: aggFields[fieldName],
+        migratedAt: new Date().toISOString(),
+    })));
+    return ref;
 }
 async function deleteInventorySnapshot(id) {
     await db.collection("inventorySnapshots").doc(id).delete();
 }
 async function deleteCustomerSnapshot(id) {
+    const aggSnap = await db.collection("customerSnapshots").doc(id).collection("aggregates").get();
+    await Promise.all(aggSnap.docs.map((d) => d.ref.delete()));
     await db.collection("customerSnapshots").doc(id).delete();
 }
-// Xoá sạch toàn bộ 1 doc cấu hình dạng key-value (Level nhân viên, DMHH, Hệ số, Giới hạn, Liều dùng...)
+// Xoá sạch toàn bộ 1 doc cấu hình dạng key-value (Level nhân viên, Hệ số, Giới hạn, Liều dùng...)
+// Riêng "productCategories" giờ là 1 collection (mỗi mã SP 1 document) nên cần xoá theo lô, không phải set 1 doc rỗng
 async function clearConfigDoc(docId) {
+    if (docId === "productCategories") {
+        const snap = await db.collection("productCategories").get();
+        const docs = snap.docs;
+        const CHUNK = 450;
+        for (let i = 0; i < docs.length; i += CHUNK) {
+            const batch = db.batch();
+            for (const d of docs.slice(i, i + CHUNK))
+                batch.delete(d.ref);
+            await batch.commit();
+        }
+        return;
+    }
     await db.collection("config").doc(docId).set({});
 }
 // ---------- small UI atoms ----------
@@ -1161,6 +1228,58 @@ const KPI_TONES = {
     pine: { bg: "#C7E8D3", border: COLORS.pine, label: COLORS.pine, sub: COLORS.pine },
     amber: { bg: "#F6C88F", border: COLORS.amber, label: "#7A3F0C", sub: "#7A3F0C" },
 };
+// ---------- Quản lý dữ liệu (dùng chung, gắn trực tiếp vào từng tab thay vì 1 trang riêng) ----------
+function ManageFilesCard({ title, items, onDelete }) {
+    const [open, setOpen] = useState(false);
+    const [deletingId, setDeletingId] = useState(null);
+    async function handleDelete(id, name) {
+        if (!window.confirm(`Xoá "${name || "(không tên)"}"? Không thể hoàn tác.`))
+            return;
+        setDeletingId(id);
+        try {
+            await onDelete(id);
+        }
+        finally {
+            setDeletingId(null);
+        }
+    }
+    if (items.length === 0)
+        return null;
+    return React.createElement(React.Fragment, null, [
+        React.createElement("div", { key: "s", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 20, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+            `Đang lưu ${items.length} file — ${title}.`,
+            React.createElement("button", { type: "button", onClick: () => setOpen(!open), style: { padding: "4px 10px", background: "transparent", border: `1px solid ${COLORS.line}`, borderRadius: 6, fontSize: 12, color: COLORS.pine, fontWeight: 600 } }, open ? "Ẩn danh sách" : "Quản lý dữ liệu")),
+        open && React.createElement("div", { key: "l", style: { border: `1px solid ${COLORS.line}`, borderRadius: 10, overflow: "hidden", marginBottom: 20, maxHeight: 280, overflowY: "auto" } },
+            React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
+                React.createElement("thead", null, React.createElement("tr", { style: { background: COLORS.card } },
+                    React.createElement("th", { style: { padding: "8px 10px", textAlign: "left" } }, "Tên file / nhãn"),
+                    React.createElement("th", { style: { padding: "8px 10px", textAlign: "left" } }, "Ngày"),
+                    React.createElement("th", { style: { padding: "8px 10px", textAlign: "right" } }, "Số dòng"),
+                    React.createElement("th", { style: { padding: "8px 10px" } }, ""))),
+                React.createElement("tbody", null, [...items].sort((a, b) => (b.periodDate || "").localeCompare(a.periodDate || "")).map((it) => {
+                    var _a;
+                    const name = it.label || it.fileName || ((_a = it.meta) === null || _a === void 0 ? void 0 : _a.fileName) || "(không tên)";
+                    const rowCount = it.rowCount || (it.meta && it.meta.rowCount) || 0;
+                    return React.createElement("tr", { key: it.id, style: { borderTop: `1px solid ${COLORS.line}` } },
+                        React.createElement("td", { style: { padding: "8px 10px" } }, name),
+                        React.createElement("td", { style: { padding: "8px 10px" } }, it.periodDate || "—"),
+                        React.createElement("td", { style: { padding: "8px 10px", textAlign: "right" } }, fmtNum(rowCount)),
+                        React.createElement("td", { style: { padding: "8px 10px", textAlign: "right" } },
+                            React.createElement("button", { type: "button", onClick: () => handleDelete(it.id, name), disabled: deletingId === it.id, style: { padding: "4px 10px", background: "transparent", color: COLORS.clay, border: `1px solid ${COLORS.clay}`, borderRadius: 6, fontSize: 12 } }, deletingId === it.id ? "Đang xoá..." : "Xoá")));
+                })))),
+    ]);
+}
+function ManageConfigRow({ label, map, docId }) {
+    const count = Object.keys(map || {}).length;
+    return React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", border: `1px solid ${COLORS.line}`, borderRadius: 10, marginBottom: 20, gap: 10, flexWrap: "wrap" } }, [
+        React.createElement("div", { key: "l" }, [
+            React.createElement("div", { key: "n", style: { fontWeight: 600, fontSize: 13.5 } }, label),
+            React.createElement("div", { key: "s", style: { fontSize: 12, color: COLORS.inkSoft } }, `${count} mục đang lưu — dữ liệu gộp dần qua nhiều lần nhập, chỉ xoá được toàn bộ.`),
+        ]),
+        React.createElement("button", { key: "del", type: "button", disabled: count === 0, onClick: () => { if (window.confirm(`Xoá TOÀN BỘ "${label}" (${count} mục)? Không thể hoàn tác — sẽ cần tải/nhập lại từ đầu.`))
+                clearConfigDoc(docId); }, style: { padding: "6px 12px", background: "#fff", border: `1px solid ${COLORS.claySoft}`, color: count === 0 ? COLORS.inkSoft : COLORS.clay, borderRadius: 8, fontSize: 12.5, cursor: count === 0 ? "default" : "pointer", opacity: count === 0 ? 0.5 : 1 } }, "Xoá toàn bộ"),
+    ]);
+}
 function KpiCard({ label, value, sub, tone }) {
     const t = KPI_TONES[tone];
     return (React.createElement("div", { style: { background: t ? t.bg : COLORS.card, border: `${t ? 2 : 1}px solid ${t ? t.border : COLORS.line}`, borderRadius: 10, padding: "16px 18px", flex: "1 1 200px", minWidth: 180 } },
@@ -1481,6 +1600,7 @@ function InventoryView({ shopConfig }) {
                     React.createElement("option", { value: 90 }, "C\u1EADn h\u1EA1n trong 90 ng\u00E0y")),
                 React.createElement(UploadStager, { onConfirm: handleFile, buttonLabel: "T\u1EA3i l\u00EAn t\u1ED3n kho m\u1EDBi", dropzoneTitle: "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u t\u1ED3n kho", dropzoneHint: 'K\u00E9o th\u1EA3 file t\u1ED3n kho (Excel/CSV) v\u00E0o \u0111\u00E2y, ho\u1EB7c b\u1EA5m "T\u1EA3i l\u00EAn t\u1ED3n kho m\u1EDBi".', showDropzone: !current })),
             error && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginBottom: 20 } }, error),
+            React.createElement(ManageFilesCard, { title: "file t\u1ED3n kho", items: snapshots, onDelete: deleteInventorySnapshot }),
             current && (React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 24 } },
                     React.createElement(KpiCard, { label: "T\u1ED5ng gi\u00E1 tr\u1ECB t\u1ED3n kho", value: fmtVND(totalValue), sub: `${current.meta.skuCount} mã hàng` }),
@@ -1700,7 +1820,9 @@ function RevenueView({ shopConfig }) {
         for (const p of periods) {
             if (!((_a = p.meta) === null || _a === void 0 ? void 0 : _a.hasDate) || !p.dailyShopAgg)
                 continue;
-            rows.push(...p.dailyShopAgg);
+            const hasBillId = !!(p.meta && p.meta.hasBillId);
+            for (const r of p.dailyShopAgg)
+                rows.push({ ...r, hasBillId });
         }
         return rows;
     }, [periods]);
@@ -1743,6 +1865,25 @@ function RevenueView({ shopConfig }) {
     const displayBillCount = displayShops.reduce((a, s) => a + (s.billCount || 0), 0);
     const displayQty = displayShops.reduce((a, s) => a + (s.qty || 0), 0);
     const displaySkuSum = displayShops.reduce((a, s) => a + (s.itemsPerBill || 0) * (s.billCount || 0), 0);
+    // Xác định trong khoảng ngày/kỳ đang xem, số liệu Số lượng bill có thực sự đếm theo Mã đơn hàng hay chỉ là ước tính
+    const rangeBillIdCoverage = useMemo(() => {
+        if (viewMode !== "range")
+            return { allHaveBillId: !!(current && current.meta && current.meta.hasBillId), someHaveBillId: !!(current && current.meta && current.meta.hasBillId) };
+        const rowsInRange = mergedDailyShop.filter((d) => (!rangeFrom || d.date >= rangeFrom) && (!rangeTo || d.date <= rangeTo));
+        if (!rowsInRange.length)
+            return { allHaveBillId: false, someHaveBillId: false };
+        return {
+            allHaveBillId: rowsInRange.every((r) => r.hasBillId),
+            someHaveBillId: rowsInRange.some((r) => r.hasBillId),
+        };
+    }, [viewMode, mergedDailyShop, rangeFrom, rangeTo, current]);
+    function billCountSubLabel() {
+        if (rangeBillIdCoverage.allHaveBillId)
+            return "Theo mã đơn hàng / hóa đơn (đã lọc trùng)";
+        if (rangeBillIdCoverage.someHaveBillId)
+            return "Một phần theo mã đơn hàng, phần còn lại ước tính = số dòng dữ liệu (do một số kỳ chưa có cột mã đơn hàng)";
+        return "Ước tính = số dòng dữ liệu (chưa phát hiện cột mã đơn hàng/hóa đơn trong file)";
+    }
     const rangeSegmentAgg = useMemo(() => {
         if (viewMode !== "range")
             return [];
@@ -1868,6 +2009,8 @@ function RevenueView({ shopConfig }) {
         for (const dp of rowsInRange) {
             if (!coefficients[dp.productCode])
                 continue;
+            if (isProductStopped(dp.productCode, categoryMap))
+                continue;
             if (!acc[dp.productCode])
                 acc[dp.productCode] = { code: dp.productCode, name: coefficients[dp.productCode].name || "", qty: 0, revenue: 0 };
             acc[dp.productCode].qty += dp.qty;
@@ -1885,7 +2028,7 @@ function RevenueView({ shopConfig }) {
             skuCount: items.length,
             items,
         };
-    }, [coefficients, mergedDailyProduct, rangeFrom, rangeTo]);
+    }, [coefficients, mergedDailyProduct, rangeFrom, rangeTo, categoryMap]);
     // ---- Doanh thu & điểm hàng hệ số theo từng cửa hàng, kèm target và tỷ lệ hoàn thành ----
     const coefficientStatsByShop = useMemo(() => {
         var _a, _b;
@@ -1896,6 +2039,8 @@ function RevenueView({ shopConfig }) {
         for (const dp of rowsInRange) {
             const c = coefficients[dp.productCode];
             if (!c)
+                continue;
+            if (isProductStopped(dp.productCode, categoryMap))
                 continue;
             if (!acc[dp.shop])
                 acc[dp.shop] = { shop: dp.shop, revenue: 0, points: 0 };
@@ -1912,7 +2057,7 @@ function RevenueView({ shopConfig }) {
                 pointsCompletion: pointsTarget ? (s.points / pointsTarget) * 100 : null,
             };
         }).sort((a, b) => b.revenue - a.revenue);
-    }, [coefficients, mergedDailyShopProduct, rangeFrom, rangeTo, shopTargets]);
+    }, [coefficients, mergedDailyShopProduct, rangeFrom, rangeTo, shopTargets, categoryMap]);
     const [targetMonthOverride, setTargetMonthOverride] = useState("");
     const [targetUploading, setTargetUploading] = useState(false);
     const [targetError, setTargetError] = useState(null);
@@ -1955,6 +2100,8 @@ function RevenueView({ shopConfig }) {
                 continue;
             const c = coefficients[dp.productCode];
             if (!c)
+                continue;
+            if (isProductStopped(dp.productCode, categoryMap))
                 continue;
             revenue += dp.revenue;
             points += dp.qty * ((_a = c.heso) !== null && _a !== void 0 ? _a : 1) * ((_b = c.diem) !== null && _b !== void 0 ? _b : 0);
@@ -2167,7 +2314,7 @@ function RevenueView({ shopConfig }) {
                         React.createElement(KpiCard, { tone: "pine", label: "T\u1EF7 l\u1EC7 d\u1EF1 ki\u1EBFn ho\u00E0n th\u00E0nh", value: targetTotalSummary.revenueProjectedPct != null ? `${targetTotalSummary.revenueProjectedPct.toFixed(0)}%` : "—", sub: `Dự kiến ${fmtNum(targetTotalSummary.revenueProjected || 0)}` })))),
                 !coefficientStats.hasCoef && (React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 } },
                     React.createElement(KpiCard, { label: "T\u1ED5ng giao d\u1ECBch", value: fmtNum(isRangeMode ? kpiChartShops.reduce((a, s) => a + (s.transactions || 0), 0) : current.meta.rowCount), sub: kpiLabel }),
-                    React.createElement(KpiCard, { label: "S\u1ED1 l\u01B0\u1EE3ng bill", value: fmtNum(kpiBillCount), sub: !isRangeMode && current.meta.hasBillId ? "Theo số hóa đơn (đã lọc trùng)" : "Ước tính = số dòng dữ liệu" }),
+                    React.createElement(KpiCard, { label: "S\u1ED1 l\u01B0\u1EE3ng bill", value: fmtNum(kpiBillCount), sub: billCountSubLabel() }),
                     React.createElement(KpiCard, { label: "Trung b\u00ECnh bill", value: fmtVND(kpiAvgBill) }),
                     React.createElement(KpiCard, { label: "SKU trung b\u00ECnh/bill", value: kpiItemsPerBill.toFixed(1) }))),
                 coefficientStats.hasCoef && (React.createElement("div", { style: { background: COLORS.card, border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: 18, marginBottom: 16 } },
@@ -2178,7 +2325,7 @@ function RevenueView({ shopConfig }) {
                         React.createElement(KpiCard, { tone: "amber", label: "T\u1EF7 l\u1EC7 d\u1EF1 ki\u1EBFn ho\u00E0n th\u00E0nh h\u00E0ng h\u1EC7 s\u1ED1", value: targetTotalSummary.hangHeSoProjectedPct != null ? `${targetTotalSummary.hangHeSoProjectedPct.toFixed(0)}%` : "—", sub: targetTotalSummary.hangHeSoProjected ? `Dự kiến ${fmtNum(targetTotalSummary.hangHeSoProjected)}` : "" })),
                     React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 } },
                         React.createElement(KpiCard, { label: "T\u1ED5ng giao d\u1ECBch", value: fmtNum(isRangeMode ? kpiChartShops.reduce((a, s) => a + (s.transactions || 0), 0) : current.meta.rowCount), sub: kpiLabel }),
-                        React.createElement(KpiCard, { label: "S\u1ED1 l\u01B0\u1EE3ng bill", value: fmtNum(kpiBillCount), sub: !isRangeMode && current.meta.hasBillId ? "Theo số hóa đơn (đã lọc trùng)" : "Ước tính = số dòng dữ liệu" }),
+                        React.createElement(KpiCard, { label: "S\u1ED1 l\u01B0\u1EE3ng bill", value: fmtNum(kpiBillCount), sub: billCountSubLabel() }),
                         React.createElement(KpiCard, { label: "Trung b\u00ECnh bill", value: fmtVND(kpiAvgBill) }),
                         React.createElement(KpiCard, { label: "SKU trung b\u00ECnh/bill", value: kpiItemsPerBill.toFixed(1) })),
                     React.createElement("div", { style: { marginTop: 20, borderTop: `1px solid ${COLORS.line}`, paddingTop: 16 } },
@@ -2606,6 +2753,8 @@ function CategoryView() {
                     score++;
                 if (n.some((h) => ["nganhhang", "nganh", "nhom1", "nhomhang", "nhom", "nhom2", "phanloai", "loai", "nhom3"].some((hint) => h.includes(hint))))
                     score++;
+                if (n.some((h) => ["trangthai", "tinhtrang"].some((hint) => h.includes(hint))))
+                    score++;
                 return score;
             });
             if (!rows.length)
@@ -2619,6 +2768,7 @@ function CategoryView() {
             const nhomCol = hasNhom123 ? exactFind(["nhom2"]) : exactFind(["nhomhang", "nhom"]);
             const loaiCol = hasNhom123 ? exactFind(["nhom3"]) : exactFind(["phanloai", "loai"]);
             const nameCol = headers.find((h) => { const n = norm(h); return n.includes("tensanpham") || n.includes("tenhang") || n.includes("tensp"); });
+            const trangThaiCol = headers.find((h) => { const n = norm(h); return n.includes("trangthai") || n.includes("tinhtrang"); });
             if (!codeCol || (!nganhCol && !nhomCol && !loaiCol)) {
                 throw new Error('Cần có cột "Mã sản phẩm" và ít nhất 1 trong 3 cột "Ngành hàng" / "Nhóm hàng" / "Phân loại" (hoặc "Nhóm 1/2/3").');
             }
@@ -2632,12 +2782,13 @@ function CategoryView() {
                     nhom: nhomCol ? ((_c = r[nhomCol]) !== null && _c !== void 0 ? _c : "").toString().trim() : "",
                     loai: loaiCol ? ((_d = r[loaiCol]) !== null && _d !== void 0 ? _d : "").toString().trim() : "",
                     name: nameCol ? ((_e = r[nameCol]) !== null && _e !== void 0 ? _e : "").toString().trim() : "",
+                    trangThai: trangThaiCol ? (r[trangThaiCol] !== null && r[trangThaiCol] !== void 0 ? r[trangThaiCol] : "").toString().trim() : "",
                 };
                 if (!(entry.nganh || entry.nhom || entry.loai))
                     continue;
                 // Nhiều dòng có thể trùng mã (khác lô/quy cách) — chỉ ghi đè từng trường khi dòng mới có giá trị, không xóa mất dữ liệu đã có
                 if (!updates[c])
-                    updates[c] = { nganh: "", nhom: "", loai: "", name: "" };
+                    updates[c] = { nganh: "", nhom: "", loai: "", name: "", trangThai: "" };
                 if (entry.nganh)
                     updates[c].nganh = entry.nganh;
                 if (entry.nhom)
@@ -2646,6 +2797,8 @@ function CategoryView() {
                     updates[c].loai = entry.loai;
                 if (entry.name)
                     updates[c].name = entry.name;
+                if (entry.trangThai)
+                    updates[c].trangThai = entry.trangThai;
             }
             // Xóa các trường rỗng để merge:true không vô tình ghi đè mất dữ liệu tốt từ lần tải trước
             for (const c of Object.keys(updates)) {
@@ -2664,7 +2817,7 @@ function CategoryView() {
         setUploading(false);
     }
     const rows = useMemo(() => {
-        let entries = Object.entries(categoryMap).map(([c, v]) => ({ code: c, name: (v === null || v === void 0 ? void 0 : v.name) || "", nganh: (v === null || v === void 0 ? void 0 : v.nganh) || "", nhom: (v === null || v === void 0 ? void 0 : v.nhom) || "", loai: (v === null || v === void 0 ? void 0 : v.loai) || "" }));
+        let entries = Object.entries(categoryMap).map(([c, v]) => ({ code: c, name: (v === null || v === void 0 ? void 0 : v.name) || "", nganh: (v === null || v === void 0 ? void 0 : v.nganh) || "", nhom: (v === null || v === void 0 ? void 0 : v.nhom) || "", loai: (v === null || v === void 0 ? void 0 : v.loai) || "", trangThai: (v === null || v === void 0 ? void 0 : v.trangThai) || "" }));
         if (search.trim()) {
             const q = norm(search);
             entries = entries.filter((e) => norm(e.code).includes(q) || norm(e.name).includes(q) || norm(e.nganh).includes(q) || norm(e.nhom).includes(q));
@@ -2755,6 +2908,8 @@ function CategoryView() {
                 background: subTab === t.id ? COLORS.pineSoft : "transparent", color: subTab === t.id ? COLORS.pine : COLORS.inkSoft,
                 fontSize: 13, fontWeight: subTab === t.id ? 600 : 400,
             } }, t.label)))),
+        React.createElement(ManageConfigRow, { label: "Danh m\u1EE5c h\u00E0ng h\u00F3a (Nh\u00F3m/Ph\u00E2n lo\u1EA1i)", map: categoryMap, docId: "productCategories" }),
+        React.createElement(ManageConfigRow, { label: "H\u1EC7 s\u1ED1 s\u1EA3n ph\u1EA9m", map: coefficients, docId: "productCoefficients" }),
         subTab === "tree" && (React.createElement(React.Fragment, null,
             React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 } },
                 React.createElement(KpiCard, { label: "T\u1ED5ng m\u00E3 \u0111\u00E3 ph\u00E2n lo\u1EA1i", value: fmtNum(categoryTree.totalSku) }),
@@ -2785,7 +2940,7 @@ function CategoryView() {
             React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 16 } },
                 React.createElement("div", { style: titleStyle }, "Danh m\u1EE5c h\u00E0ng h\u00F3a (M\u00E3 SP, T\u00EAn SP, Ng\u00E0nh/Nh\u00F3m/Ph\u00E2n lo\u1EA1i) l\u1EA5y t\u1EEB file DMHH t\u1EA3i l\u00EAn b\u00EAn d\u01B0\u1EDBi \u2014 kh\u00F4ng t\u1EF1 \u0111\u1ED9ng l\u1EA5y t\u1EEB file T\u1ED3n kho.")),
             React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 16 } },
-                React.createElement("div", { style: titleStyle }, "T\u1EA3i file DMHH l\u00EAn (c\u1EA7n c\u1ED9t \"M\u00E3 s\u1EA3n ph\u1EA9m\" v\u00E0 \"Ng\u00E0nh h\u00E0ng\" / \"Nh\u00F3m h\u00E0ng\" / \"Ph\u00E2n lo\u1EA1i\", c\u00F3 th\u1EC3 k\u00E8m \"T\u00EAn s\u1EA3n ph\u1EA9m\")"),
+                React.createElement("div", { style: titleStyle }, "T\u1EA3i file DMHH l\u00EAn (c\u1EA7n c\u1ED9t \"M\u00E3 s\u1EA3n ph\u1EA9m\" v\u00E0 \"Ng\u00E0nh h\u00E0ng\" / \"Nh\u00F3m h\u00E0ng\" / \"Ph\u00E2n lo\u1EA1i\", c\u00F3 th\u1EC3 k\u00E8m \"T\u00EAn s\u1EA3n ph\u1EA9m\" v\u00E0 \"Tr\u1EA1ng th\u00E1i\" \u2014 s\u1EA3n ph\u1EA9m \u0111\u00E1nh d\u1EA5u \"D\u1EEBng\"/\"Ng\u1EEBng b\u00E1n\" s\u1EBD kh\u00F4ng \u0111\u01B0\u1EE3c t\u00EDnh v\u00E0o doanh thu h\u00E0ng h\u1EC7 s\u1ED1)"),
                 React.createElement(UploadStager, { onConfirm: async (file) => handleBulkFile(file), buttonLabel: uploading ? "Đang xử lý..." : "Tải file lên", dropzoneTitle: "K\u00E9o th\u1EA3 file DMHH v\u00E0o \u0111\u00E2y", dropzoneHint: 'File c\u1EA7n c\u00F3 c\u1ED9t "M\u00E3 s\u1EA3n ph\u1EA9m" v\u00E0 \u00EDt nh\u1EA5t 1 c\u1ED9t ph\u00E2n lo\u1EA1i.', showDropzone: true, showLabelInput: false }),
                 error && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginTop: 12 } }, error)),
             React.createElement("div", { style: { ...cardStyle, background: COLORS.card } },
@@ -2804,6 +2959,7 @@ function CategoryView() {
                                 React.createElement("th", { style: { padding: "6px 8px" } }, "Ng\u00E0nh h\u00E0ng"),
                                 React.createElement("th", { style: { padding: "6px 8px" } }, "Nh\u00F3m h\u00E0ng"),
                                 React.createElement("th", { style: { padding: "6px 8px" } }, "Ph\u00E2n lo\u1EA1i"),
+                                React.createElement("th", { style: { padding: "6px 8px" } }, "Tr\u1EA1ng th\u00E1i"),
                                 React.createElement("th", { style: { padding: "6px 8px" } }))),
                         React.createElement("tbody", null, rows.slice(0, 500).map((r) => (React.createElement("tr", { key: r.code, style: { borderTop: `1px solid ${COLORS.line}` } },
                             React.createElement("td", { style: { padding: "8px", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 } }, r.code),
@@ -2811,6 +2967,9 @@ function CategoryView() {
                             React.createElement("td", { style: { padding: "8px" } }, r.nganh),
                             React.createElement("td", { style: { padding: "8px", color: COLORS.inkSoft } }, r.nhom),
                             React.createElement("td", { style: { padding: "8px", color: COLORS.inkSoft } }, r.loai),
+                            React.createElement("td", { style: { padding: "8px" } }, isProductStopped(r.code, categoryMap)
+                                ? React.createElement("span", { style: { color: COLORS.clay, fontWeight: 600, fontSize: 12 } }, r.trangThai || "Dừng")
+                                : React.createElement("span", { style: { color: COLORS.inkSoft, fontSize: 12 } }, r.trangThai || "—")),
                             React.createElement("td", { style: { padding: "8px", textAlign: "right" } },
                                 React.createElement("button", { onClick: () => deleteProductCategory(r.code), style: { background: "none", border: "none", color: COLORS.clay, fontSize: 12 } }, "X\u00F3a")))))))))))),
         subTab === "coef" && (React.createElement(React.Fragment, null,
@@ -3118,6 +3277,7 @@ function EmployeeView({ shopConfig }) {
         React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 20 } },
             React.createElement(UploadStager, { onConfirm: async (file) => handleLevelFile(file), buttonLabel: levelUploading ? "\u0110ang x\u1EED l\u00FD..." : "T\u1EA3i file Level nh\u00E2n vi\u00EAn", dropzoneTitle: "K\u00E9o th\u1EA3 file Level v\u00E0o \u0111\u00E2y", dropzoneHint: 'File c\u1EA7n c\u00F3 c\u1ED9t "H\u1ECD v\u00E0 t\u00EAn" v\u00E0 "Level" (gi\u1ED1ng file KV_....xlsx).', showDropzone: false, showLabelInput: false }),
             React.createElement("button", { type: "button", onClick: () => setShowAllNames(!showAllNames), style: { padding: "9px 14px", background: "transparent", border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 13, color: COLORS.inkSoft } }, `${showAllNames ? "\u1EA8n" : "Ki\u1EC3m tra"} danh s\u00E1ch t\u00EAn nh\u00E2n vi\u00EAn trong d\u1EEF li\u1EC7u (${allEmployeeNames.length})`)),
+        React.createElement(ManageConfigRow, { label: "Level nh\u00E2n vi\u00EAn", map: employeeLevels, docId: "employeeLevels" }),
         levelError && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginBottom: 16 } }, levelError),
         showAllNames && (React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20, maxHeight: 320, overflowY: "auto" } },
             React.createElement("div", { style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "T\u1EA5t c\u1EA3 t\u00EAn nh\u00E2n vi\u00EAn xu\u1EA5t hi\u1EC7n trong d\u1EEF li\u1EC7u doanh thu \u0111\u00E3 t\u1EA3i (kh\u00F4ng l\u1ECDc theo ng\u00E0y/t\u00ECm ki\u1EBFm) \u2014 d\u00F9ng \u0111\u1EC3 so\u00E1t t\u00EAn b\u1ECB l\u1EC7ch ch\u00EDnh t\u1EA3/vi\u1EBFt hoa kh\u00E1c nhau gi\u1EEFa c\u00E1c file, ho\u1EB7c ch\u01B0a kh\u1EDBp \u0111\u01B0\u1EE3c v\u1EDBi file Level."),
@@ -3617,6 +3777,9 @@ function CustomerView({ shopConfig }) {
                     tierOptions.map((t) => React.createElement("option", { key: t }, t)))),
                 React.createElement(UploadStager, { onConfirm: handleFile, buttonLabel: "T\u1EA3i l\u00EAn danh s\u00E1ch kh\u00E1ch h\u00E0ng", dropzoneTitle: "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u kh\u00E1ch h\u00E0ng", dropzoneHint: 'K\u00E9o th\u1EA3 file danh s\u00E1ch kh\u00E1ch h\u00E0ng (Excel/CSV) v\u00E0o \u0111\u00E2y, ho\u1EB7c b\u1EA5m n\u00FAt t\u1EA3i l\u00EAn.', showDropzone: !current })),
             error && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginBottom: 20 } }, error),
+            React.createElement(ManageFilesCard, { title: "danh s\u00E1ch kh\u00E1ch h\u00E0ng", items: snapshots, onDelete: deleteCustomerSnapshot }),
+            React.createElement(ManageConfigRow, { label: "Gi\u1EDBi h\u1EA1n s\u1EA3n ph\u1EA9m (c\u1EA3nh b\u00E1o gian l\u1EADn)", map: productLimits, docId: "productLimits" }),
+            React.createElement(ManageConfigRow, { label: "Li\u1EC1u d\u00F9ng thu\u1ED1c m\u1EA1n t\u00EDnh", map: chronicDosage, docId: "chronicDosage" }),
             current && (React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 24 } },
                     React.createElement(KpiCard, { label: "T\u1ED5ng kh\u00E1ch h\u00E0ng", value: fmtNum(totalCustomers), sub: current.label }),
@@ -4443,72 +4606,6 @@ function fmtBytesApprox(n) {
     if (n == null) return "—";
     return fmtNum(n);
 }
-function DataManagementView() {
-    const [periods, setPeriods] = useState([]);
-    const [inventory, setInventory] = useState([]);
-    const [customers, setCustomers] = useState([]);
-    const [employeeLevels, setEmployeeLevels] = useState({});
-    const [categoryMap, setCategoryMap] = useState({});
-    const [productLimits, setProductLimits] = useState({});
-    const [chronicDosage, setChronicDosage] = useState({});
-    const [coefficients, setCoefficients] = useState({});
-    useEffect(() => {
-        const u1 = subscribePeriods(setPeriods, []);
-        const u2 = subscribeInventory(setInventory);
-        const u3 = subscribeCustomers(setCustomers);
-        const u4 = subscribeEmployeeLevels(setEmployeeLevels);
-        const u5 = subscribeProductCategories(setCategoryMap);
-        const u6 = subscribeProductLimits(setProductLimits);
-        const u7 = subscribeChronicDosage(setChronicDosage);
-        const u8 = subscribeProductCoefficients(setCoefficients);
-        return () => { u1(); u2(); u3(); u4(); u5(); u6(); u7(); u8(); };
-    }, []);
-
-    function fileRow(item, onDelete, extraLabel) {
-        return React.createElement("div", { key: item.id, style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: `1px solid ${COLORS.line}`, gap: 10, flexWrap: "wrap" } }, [
-            React.createElement("div", { key: "l" }, [
-                React.createElement("div", { key: "n", style: { fontWeight: 600, fontSize: 13.5 } }, item.label || item.fileName || "(không tên)"),
-                React.createElement("div", { key: "s", style: { fontSize: 12, color: COLORS.inkSoft } }, `${item.periodDate || ""}${extraLabel ? " · " + extraLabel : ""}`),
-            ]),
-            React.createElement("button", { key: "del", type: "button", onClick: () => { if (window.confirm(`Xoá "${item.label || item.fileName}"? Không thể hoàn tác.`)) onDelete(item.id); }, style: { padding: "6px 12px", background: "#fff", border: `1px solid ${COLORS.claySoft}`, color: COLORS.clay, borderRadius: 8, fontSize: 12.5, cursor: "pointer" } }, "Xoá"),
-        ]);
-    }
-    function fileListCard(title, items, onDelete, extraLabelFn) {
-        return React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20 } }, [
-            React.createElement("div", { key: "t", style: titleStyle }, `${title} (${items.length})`),
-            items.length === 0
-                ? React.createElement("div", { key: "e", style: { color: COLORS.inkSoft, fontSize: 13, padding: "10px 0" } }, "Chưa có file nào.")
-                : React.createElement("div", { key: "list" }, [...items].reverse().map((it) => fileRow(it, onDelete, extraLabelFn ? extraLabelFn(it) : null))),
-        ]);
-    }
-    function configClearRow(label, docId, map, setMap) {
-        const count = Object.keys(map || {}).length;
-        return React.createElement("div", { key: docId, style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: `1px solid ${COLORS.line}`, gap: 10, flexWrap: "wrap" } }, [
-            React.createElement("div", { key: "l" }, [
-                React.createElement("div", { key: "n", style: { fontWeight: 600, fontSize: 13.5 } }, label),
-                React.createElement("div", { key: "s", style: { fontSize: 12, color: COLORS.inkSoft } }, `${count} mục đang lưu`),
-            ]),
-            React.createElement("button", { key: "del", type: "button", disabled: count === 0, onClick: () => { if (window.confirm(`Xoá TOÀN BỘ "${label}" (${count} mục)? Không thể hoàn tác — sẽ cần tải/nhập lại từ đầu.`)) clearConfigDoc(docId); }, style: { padding: "6px 12px", background: "#fff", border: `1px solid ${COLORS.claySoft}`, color: count === 0 ? COLORS.inkSoft : COLORS.clay, borderRadius: 8, fontSize: 12.5, cursor: count === 0 ? "default" : "pointer", opacity: count === 0 ? 0.5 : 1 } }, "Xoá toàn bộ"),
-        ]);
-    }
-
-    return React.createElement(React.Fragment, null, [
-        React.createElement("h2", { key: "title", className: "pagetitle" || undefined, style: { fontFamily: "'Fraunces', serif", fontSize: 26, fontWeight: 600, marginBottom: 6 } }, "Quản lý dữ liệu đã tải lên"),
-        React.createElement("p", { key: "sub", style: { color: COLORS.inkSoft, fontSize: 13.5, marginBottom: 22 } }, "Xoá bớt các file/dữ liệu không còn cần thiết. Thao tác xoá không thể hoàn tác — các báo cáo liên quan sẽ tự cập nhật lại ngay sau khi xoá."),
-        fileListCard("Kỳ doanh thu đã tải (tab Doanh thu)", periods, deletePeriod, (p) => { var _a; return `${fmtNum(p.rowCount || 0)} dòng${((_a = p.meta) === null || _a === void 0 ? void 0 : _a.fileName) ? " · " + p.meta.fileName : ""}`; }),
-        fileListCard("File tồn kho đã tải (tab Tồn kho)", inventory, deleteInventorySnapshot, (p) => `${fmtNum(p.rowCount || 0)} dòng`),
-        fileListCard("File khách hàng đã tải (tab Khách hàng)", customers, deleteCustomerSnapshot, (p) => `${fmtNum(p.rowCount || 0)} dòng`),
-        React.createElement("div", { key: "config", style: { ...cardStyle, background: COLORS.card } }, [
-            React.createElement("div", { key: "t", style: titleStyle }, "Dữ liệu cấu hình khác"),
-            React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Các dữ liệu này được gộp dần qua nhiều lần tải/nhập, không tách riêng theo từng file — chỉ có thể xoá sạch toàn bộ rồi nhập lại, không xoá được từng lần tải riêng lẻ."),
-            configClearRow("Level nhân viên", "employeeLevels", employeeLevels, setEmployeeLevels),
-            configClearRow("Danh mục hàng hóa (Nhóm/Phân loại DMHH)", "productCategories", categoryMap, setCategoryMap),
-            configClearRow("Hệ số sản phẩm", "productCoefficients", coefficients, setCoefficients),
-            configClearRow("Giới hạn sản phẩm (cảnh báo gian lận)", "productLimits", productLimits, setProductLimits),
-            configClearRow("Liều dùng thuốc mạn tính", "chronicDosage", chronicDosage, setChronicDosage),
-        ]),
-    ]);
-}
 // ---------- Main dashboard ----------
 const TABS = [
     { id: "revenue", label: "Doanh thu" },
@@ -4517,7 +4614,6 @@ const TABS = [
     { id: "category", label: "Danh mục hàng hóa" },
     { id: "customer", label: "Khách hàng" },
     { id: "promo", label: "Khuyến mại" },
-    { id: "data", label: "Quản lý dữ liệu" },
 ];
 function Dashboard({ user }) {
     var _a;
@@ -4562,8 +4658,7 @@ function Dashboard({ user }) {
             activeTab === "employee" && React.createElement(EmployeeView, { shopConfig: shopConfig }),
             activeTab === "category" && React.createElement(CategoryView, null),
             activeTab === "customer" && React.createElement(CustomerView, { shopConfig: shopConfig }),
-            activeTab === "promo" && React.createElement(PromoView, { shopConfig: shopConfig }),
-            activeTab === "data" && React.createElement(DataManagementView, null)),
+            activeTab === "promo" && React.createElement(PromoView, { shopConfig: shopConfig })),
         showSettings && (React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 } },
             React.createElement("div", { style: { background: COLORS.card, borderRadius: 12, padding: 24, width: 420, maxHeight: "80vh", overflowY: "auto" } },
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 16 } },
