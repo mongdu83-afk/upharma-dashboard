@@ -339,6 +339,50 @@ async function parseTargetFile(file) {
         throw new Error("Không đọc được dòng target nào cho cửa hàng.");
     return { month, targets, employeeTargets };
 }
+// Đọc file kế hoạch chạy khuyến mại của tháng (Tên CTKM, Cơ chế, Từ ngày, Đến ngày, Đối tượng/Cửa hàng áp dụng)
+async function parsePromoPlanFile(file) {
+    let rows = await readRowsBestSheet(file, (headers) => {
+        const n = headers.map(norm);
+        let score = 0;
+        if (n.some((h) => ["tenctkm", "tenchuongtrinh", "chuongtrinh", "tenkhuyenmai", "tenchuongtrinhkhuyenmai"].some((hint) => h.includes(hint))))
+            score++;
+        if (n.some((h) => ["tungay", "ngaybatdau", "batdau"].some((hint) => h.includes(hint))))
+            score++;
+        return score;
+    });
+    if (!rows.length)
+        throw new Error("File trống.");
+    const headers = Object.keys(rows[0]);
+    const nameCol = headers.find((h) => { const n = norm(h); return n.includes("tenctkm") || n.includes("tenchuongtrinh") || n.includes("chuongtrinh") || n.includes("tenkhuyenmai"); });
+    const mechanismCol = headers.find((h) => { const n = norm(h); return n.includes("coche") || n.includes("mota") || n.includes("noidung"); });
+    const fromCol = headers.find((h) => { const n = norm(h); return n.includes("tungay") || n.includes("ngaybatdau") || n === "batdau"; });
+    const toCol = headers.find((h) => { const n = norm(h); return n.includes("denngay") || n.includes("ngayketthuc") || n === "ketthuc"; });
+    const targetCol = headers.find((h) => { const n = norm(h); return n.includes("doituong") || n.includes("apdung") || n.includes("cuahang"); });
+    if (!nameCol) {
+        throw new Error('Cần có cột "Tên CTKM" / "Tên chương trình".');
+    }
+    function toISO(v) {
+        const d = parseVNDate(v);
+        return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : "";
+    }
+    const items = [];
+    for (const r of rows) {
+        var _a, _b, _c, _d;
+        const name = ((_a = r[nameCol]) !== null && _a !== void 0 ? _a : "").toString().trim();
+        if (!name)
+            continue;
+        items.push({
+            name,
+            mechanism: mechanismCol ? ((_b = r[mechanismCol]) !== null && _b !== void 0 ? _b : "").toString().trim() : "",
+            fromDate: fromCol ? toISO(r[fromCol]) : "",
+            toDate: toCol ? toISO(r[toCol]) : "",
+            target: targetCol ? ((_c = r[targetCol]) !== null && _c !== void 0 ? _c : "").toString().trim() : "",
+        });
+    }
+    if (!items.length)
+        throw new Error("Không có dòng chương trình nào hợp lệ trong file.");
+    return items;
+}
 async function parseFile(file) {
     var _a, _b, _c, _d, _e, _f, _g, _h;
     let rows = await readRowsBestSheet(file, (headers) => {
@@ -1151,6 +1195,20 @@ function subscribeCategoryList(cb) {
 async function saveCategoryList(names) {
     await db.collection("config").doc("categoryList").set({ names });
 }
+function subscribePromoPlans(cb) {
+    return db.collection("promoPlans").orderBy("periodDate", "asc").onSnapshot((snap) => {
+        cb(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+}
+async function savePromoPlan(label, items, periodDate) {
+    await db.collection("promoPlans").add({
+        label, periodDate: periodDate || todayISO(), items,
+        uploadedAtTs: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+}
+async function deletePromoPlan(id) {
+    await db.collection("promoPlans").doc(id).delete();
+}
 function subscribeCustomers(cb) {
     return db.collection("customerSnapshots").orderBy("periodDate", "asc").onSnapshot(async (snap) => {
         const list = await Promise.all(snap.docs.map(async (d) => {
@@ -1227,6 +1285,7 @@ function LabelTag({ children, tone }) {
 const KPI_TONES = {
     pine: { bg: "#C7E8D3", border: COLORS.pine, label: COLORS.pine, sub: COLORS.pine },
     amber: { bg: "#F6C88F", border: COLORS.amber, label: "#7A3F0C", sub: "#7A3F0C" },
+    clay: { bg: COLORS.claySoft, border: COLORS.clay, label: COLORS.clay, sub: COLORS.clay },
 };
 // ---------- Quản lý dữ liệu (dùng chung, gắn trực tiếp vào từng tab thay vì 1 trang riêng) ----------
 function ManageFilesCard({ title, items, onDelete }) {
@@ -4484,6 +4543,69 @@ function PromoAutoView({ shopConfig }) {
     const totalQty = groups.reduce((s, g) => s + g.qty, 0);
     const totalRevenue = groups.reduce((s, g) => s + g.revenue, 0);
     const ready = groups.length > 0;
+    // Chi phí khuyến mại: giảm giá trực tiếp (doanh thu âm) tính ra tiền; tặng quà (doanh thu = 0) chỉ đếm số lượng vì chưa có dữ liệu giá tham chiếu
+    const costBreakdown = useMemo(() => {
+        let discountCost = 0, giftQty = 0, giftTransactions = 0;
+        for (const r of rawRows) {
+            if (r.revenue < 0)
+                discountCost += Math.abs(r.revenue);
+            else if (r.revenue === 0) {
+                giftQty += r.qty || 0;
+                giftTransactions += r.transactions || 0;
+            }
+        }
+        return { discountCost, giftQty, giftTransactions };
+    }, [rawRows]);
+    // ---- Kế hoạch khuyến mại tháng: tải lên rồi đối chiếu với dữ liệu thực tế đã phát hiện ----
+    const [promoPlans, setPromoPlans] = useState([]);
+    const [planUploading, setPlanUploading] = useState(false);
+    const [planError, setPlanError] = useState(null);
+    useEffect(() => {
+        const u = subscribePromoPlans(setPromoPlans);
+        return () => u();
+    }, []);
+    async function handlePlanFile(file, label, periodDate) {
+        setPlanError(null);
+        setPlanUploading(true);
+        try {
+            const items = await parsePromoPlanFile(file);
+            await savePromoPlan(label || file.name, items, periodDate);
+        }
+        catch (e) {
+            setPlanError(e.message || "Không đọc được file.");
+            throw e;
+        }
+        finally {
+            setPlanUploading(false);
+        }
+    }
+    function rangesOverlap(aFrom, aTo, bFrom, bTo) {
+        if (!aFrom || !aTo || !bFrom || !bTo)
+            return true; // thiếu ngày ở 1 trong 2 bên thì chỉ so theo tên, không loại theo ngày
+        return aFrom <= bTo && bFrom <= aTo;
+    }
+    const planComparison = useMemo(() => {
+        const allItems = [];
+        for (const plan of promoPlans) {
+            for (const it of (plan.items || []))
+                allItems.push({ ...it, planId: plan.id, planLabel: plan.label });
+        }
+        const matchedGroupNames = new Set();
+        const rows = allItems.map((it) => {
+            const key = norm(it.name);
+            const match = key ? groups.find((g) => {
+                const gkey = norm(g.name);
+                if (!(gkey.includes(key) || key.includes(gkey)))
+                    return false;
+                return rangesOverlap(it.fromDate, it.toDate, g.fromDate, g.toDate);
+            }) : null;
+            if (match)
+                matchedGroupNames.add(match.name);
+            return { ...it, matched: !!match, matchedGroup: match || null };
+        });
+        const extraGroups = groups.filter((g) => !matchedGroupNames.has(g.name));
+        return { rows, extraGroups };
+    }, [promoPlans, groups]);
 
     async function runAiAnalysis() {
         setAiLoading(true); setAiError(null); setAiResult(null);
@@ -4528,6 +4650,14 @@ function PromoAutoView({ shopConfig }) {
         React.createElement("div", { key: "hint", style: { fontSize: 12, color: COLORS.inkSoft } }, "App tự dò các dòng trong cột \"Tên sản phẩm\" của file doanh thu có chứa từ khoá CTKM/Voucher/Coupon/Khuyến mãi/Tặng quà/Ưu đãi, rồi gộp thành từng chương trình. Không cần nhập tay mã sản phẩm."),
     ]);
 
+    const planCard = React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20 } }, [
+        React.createElement("div", { key: "t", style: titleStyle }, "Kế hoạch chạy khuyến mại của tháng"),
+        React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Tải file Excel liệt kê các chương trình dự kiến chạy trong tháng (cần cột \"Tên CTKM\"/\"Tên chương trình\", có thể kèm \"Cơ chế\", \"Từ ngày\", \"Đến ngày\", \"Đối tượng/Cửa hàng áp dụng\") để đối chiếu với dữ liệu thực tế đã phát hiện ở trên."),
+        React.createElement(UploadStager, { onConfirm: (file, label, periodDate) => handlePlanFile(file, label, periodDate), buttonLabel: planUploading ? "Đang xử lý..." : "Tải kế hoạch khuyến mại lên", dropzoneTitle: "Kéo thả file kế hoạch vào đây", dropzoneHint: 'File cần có cột "Tên CTKM" / "Tên chương trình".', showDropzone: false, showLabelInput: true }),
+        planError && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginTop: 12 } }, planError),
+        React.createElement(ManageFilesCard, { title: "kế hoạch khuyến mại đã tải", items: promoPlans, onDelete: deletePromoPlan }),
+    ]);
+
     let resultBlock;
     if (filesWithProductName === 0) {
         resultBlock = React.createElement("div", { style: { ...cardStyle, textAlign: "center", color: COLORS.inkSoft } }, "Chưa file doanh thu nào nhận diện được cột \"Tên sản phẩm\". Kiểm tra lại tên cột trong file, hoặc gửi tên cột thật để mình khớp cho đúng.");
@@ -4538,6 +4668,8 @@ function PromoAutoView({ shopConfig }) {
             React.createElement(KpiCard, { key: "cnt", label: "Số chương trình phát hiện", value: fmtNum(groups.length), tone: "amber" }),
             React.createElement(KpiCard, { key: "qty", label: "Tổng số lượt áp dụng", value: fmtNum(totalQty) }),
             React.createElement(KpiCard, { key: "rev", label: "Tổng doanh thu ghi nhận", value: fmtVND(totalRevenue), sub: "0đ là bình thường nếu đây là dòng tặng quà/voucher không thu tiền" }),
+            React.createElement(KpiCard, { key: "cost", label: "Chi phí giảm giá trực tiếp", value: fmtVND(costBreakdown.discountCost), tone: "clay", sub: "Tổng số tiền đã giảm trừ (từ các dòng doanh thu âm)" }),
+            React.createElement(KpiCard, { key: "gift", label: "Số lượt tặng quà", value: fmtNum(costBreakdown.giftQty), sub: "Chưa quy ra tiền do thiếu dữ liệu giá tham chiếu" }),
             React.createElement(KpiCard, { key: "range", label: "Khoảng dữ liệu", value: minDate && maxDate ? `${minDate} → ${maxDate}` : "—" }),
         ]);
 
@@ -4579,9 +4711,45 @@ function PromoAutoView({ shopConfig }) {
         ]);
     }
 
+    let comparisonBlock = null;
+    if (planComparison.rows.length > 0) {
+        const planHeaderCells = ["Tên CTKM (kế hoạch)", "Cơ chế", "Từ ngày", "Đến ngày", "Trạng thái"].map((h, i) =>
+            React.createElement("th", { key: i, style: { padding: "6px 8px", textAlign: "left" } }, h));
+        const planBodyRows = planComparison.rows.map((it, i) => React.createElement("tr", { key: i, style: { borderTop: `1px solid ${COLORS.line}` } }, [
+            React.createElement("td", { key: "n", style: { padding: "9px 8px", maxWidth: 320 } }, it.name),
+            React.createElement("td", { key: "m", style: { padding: "9px 8px", color: COLORS.inkSoft, maxWidth: 260 } }, it.mechanism || "—"),
+            React.createElement("td", { key: "f", style: { padding: "9px 8px", color: COLORS.inkSoft } }, it.fromDate || "—"),
+            React.createElement("td", { key: "t", style: { padding: "9px 8px", color: COLORS.inkSoft } }, it.toDate || "—"),
+            React.createElement("td", { key: "s", style: { padding: "9px 8px" } }, it.matched
+                ? React.createElement("span", { style: { color: COLORS.pine, fontWeight: 600, fontSize: 12.5 } }, `✅ Đã chạy (${fmtNum(it.matchedGroup.qty)} lượt, ${fmtVND(it.matchedGroup.revenue)})`)
+                : React.createElement("span", { style: { color: COLORS.clay, fontWeight: 600, fontSize: 12.5 } }, "⚠️ Chưa phát hiện dữ liệu")),
+        ]));
+        const planTableCard = React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20 } }, [
+            React.createElement("div", { key: "t", style: titleStyle }, `Đối chiếu kế hoạch với dữ liệu thực tế (${planComparison.rows.length} chương trình trong kế hoạch)`),
+            React.createElement("table", { key: "tbl", style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } }, [
+                React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase" } }, planHeaderCells)),
+                React.createElement("tbody", { key: "b" }, planBodyRows),
+            ]),
+        ]);
+        const extraCard = planComparison.extraGroups.length > 0 ? React.createElement("div", { style: { ...cardStyle, background: COLORS.card } }, [
+            React.createElement("div", { key: "t", style: titleStyle }, `Chương trình phát hiện nhưng không có trong kế hoạch (${planComparison.extraGroups.length})`),
+            React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Có thể là chương trình phát sinh ngoài kế hoạch, hoặc tên trong kế hoạch không khớp được với tên thực tế — kiểm tra lại chính tả nếu nghi ngờ bị bỏ sót."),
+            React.createElement("div", { key: "list" }, planComparison.extraGroups.map((g, i) => React.createElement("div", { key: i, style: { padding: "8px 0", borderTop: i > 0 ? `1px solid ${COLORS.line}` : "none", fontSize: 13, display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" } }, [
+                React.createElement("span", { key: "n" }, g.name),
+                React.createElement("span", { key: "v", style: { color: COLORS.inkSoft } }, `${fmtNum(g.qty)} lượt · ${fmtVND(g.revenue)}`),
+            ]))),
+        ]) : null;
+        comparisonBlock = React.createElement(React.Fragment, null, [
+            React.createElement(React.Fragment, { key: "pt" }, planTableCard),
+            extraCard && React.createElement(React.Fragment, { key: "ex" }, extraCard),
+        ]);
+    }
+
     return React.createElement(React.Fragment, null, [
         React.createElement(React.Fragment, { key: "filter" }, filterCard),
+        React.createElement(React.Fragment, { key: "plan" }, planCard),
         React.createElement(React.Fragment, { key: "result" }, resultBlock),
+        comparisonBlock && React.createElement(React.Fragment, { key: "compare" }, comparisonBlock),
     ]);
 }
 function PromoView({ shopConfig }) {
