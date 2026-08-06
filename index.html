@@ -401,6 +401,7 @@ async function parsePromoSkuFile(file) {
     const originalPriceCol = headers.find((h) => { const n = norm(h); return n.includes("giagoc") || n.includes("gianiemyet") || n.includes("giabanle"); });
     const discountPriceCol = headers.find((h) => { const n = norm(h); return (n.includes("giasaugiam") || n.includes("giakhuyenmai") || n.includes("giakm") || n.includes("giaban")) && !n.includes("goc"); });
     const nameCol = headers.find((h) => { const n = norm(h); return n.includes("tenctkm") || n.includes("tenchuongtrinh") || n.includes("chuongtrinh"); });
+    const shopCol = headers.find((h) => { const n = norm(h); return n.includes("cuahang") || n.includes("doituong") || n.includes("apdung"); });
     if (!codeCol) {
         throw new Error('Cần có cột "Mã sản phẩm".');
     }
@@ -415,14 +416,51 @@ async function parsePromoSkuFile(file) {
             continue;
         const originalPrice = parseNumber(r[originalPriceCol]);
         const discountPrice = parseNumber(r[discountPriceCol]);
+        const shopRaw = shopCol ? ((_c = r[shopCol]) !== null && _c !== void 0 ? _c : "").toString().trim() : "";
+        // Danh sách cửa hàng áp dụng, tách theo dấu phẩy/chấm phẩy; để trống = áp dụng cho TẤT CẢ cửa hàng
+        const shops = shopRaw ? shopRaw.split(/[,;]/).map((s) => s.trim().toUpperCase()).filter(Boolean) : [];
         items.push({
-            code, originalPrice, discountPrice,
+            code, originalPrice, discountPrice, shops,
             ctkmName: nameCol ? ((_b = r[nameCol]) !== null && _b !== void 0 ? _b : "").toString().trim() || "Giảm giá trực tiếp theo mã SP" : "Giảm giá trực tiếp theo mã SP",
         });
     }
     if (!items.length)
         throw new Error("Không có dòng mã sản phẩm nào hợp lệ trong file.");
     return items;
+}
+// Đọc file gom nhóm tên chương trình: cột A = Tên chương trình đã phát hiện (đúng như hiển thị trong app),
+// cột B = Tên nhóm muốn gộp về. File có thể có hoặc không có dòng tiêu đề ở đầu.
+async function parseProgramNameGroupFile(file) {
+    const ext = file.name.split(".").pop().toLowerCase();
+    let rows;
+    if (ext === "csv") {
+        const text = await file.text();
+        rows = Papa.parse(text, { header: false, skipEmptyLines: true }).data;
+    } else {
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type: "array" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+    }
+    if (!rows.length)
+        throw new Error("File trống.");
+    const map = {};
+    let count = 0;
+    for (const r of rows) {
+        const rawName = (r[0] ?? "").toString().trim();
+        const groupName = (r[1] ?? "").toString().trim();
+        if (!rawName || !groupName)
+            continue;
+        const normRaw = norm(rawName), normGroup = norm(groupName);
+        // Bỏ qua dòng tiêu đề nếu file có (vd "Tên chương trình" / "Tên nhóm")
+        if ((normRaw.includes("tenchuongtrinh") || normRaw.includes("tenctkm")) && (normGroup.includes("nhom") || normGroup.includes("group")))
+            continue;
+        map[collapseWhitespace(rawName).toLowerCase()] = groupName;
+        count++;
+    }
+    if (!count)
+        throw new Error('Không đọc được dòng ánh xạ nào. File cần cột A = Tên chương trình đã phát hiện, cột B = Tên nhóm.');
+    return map;
 }
 async function parseFile(file) {
     var _a, _b, _c, _d, _e, _f, _g, _h;
@@ -461,6 +499,11 @@ async function parseFile(file) {
         throw new Error("Không nhận diện được cột Mã cửa hàng và/hoặc Doanh thu. Kiểm tra lại tiêu đề cột.");
     }
     const byShop = {}, byDate = {}, byCategory = {}, byProduct = {}, byDateShop = {}, byEmployee = {}, byCustomerProduct = {}, byDateEmployee = {}, byBill = {}, byCustomer = {}, byEmployeeProduct = {}, byDateProduct = {}, byDateShopProduct = {}, byShopProduct = {}, byShopCategory = {}, byDateShopCategory = {}, byDateProductName = {}, byDateShopProductName = {}, byDateCustomerProduct = {};
+    // Doanh thu ghi nhận theo Mã đơn hàng: với mỗi mã đơn hàng, cộng dồn TẤT CẢ doanh số điều chỉnh (mọi dòng, mọi
+    // sản phẩm) trong đơn đó, để sau này biết mã giảm giá xuất hiện ở đơn nào thì lấy đúng tổng doanh thu của đơn đó.
+    const billRevenueMap = {};
+    // Ngày×Cửa hàng×Mã sản phẩm -> tập hợp các Mã đơn hàng có chứa mã SP đó (dùng để tính doanh thu ghi nhận cho báo cáo CTKM)
+    const byDateShopProductBill = {};
     let rowCount = 0;
     const hasBillId = !!colMap.billId, hasCustomerId = !!colMap.customerId, hasProductCode = !!colMap.productCode, hasProductName = !!colMap.productName, hasEmployee = !!colMap.employeeCode || !!colMap.employeeName;
     const skuTrackable = hasBillId && hasProductCode;
@@ -482,6 +525,17 @@ async function parseFile(file) {
         const customerName = colMap.customerName ? ((_g = r[colMap.customerName]) !== null && _g !== void 0 ? _g : "").toString().trim() : null;
         const dateKeyForBill = dt ? `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}` : null;
         rowCount++;
+        if (billId) {
+            if (!billRevenueMap[billId])
+                billRevenueMap[billId] = { shop, date: dateKeyForBill, revenue: 0 };
+            billRevenueMap[billId].revenue += rev;
+        }
+        if (billId && productCode) {
+            const dspbKey = `${dateKeyForBill}__${shop}__${productCode}`;
+            if (!byDateShopProductBill[dspbKey])
+                byDateShopProductBill[dspbKey] = new Set();
+            byDateShopProductBill[dspbKey].add(billId);
+        }
         if (!byShop[shop])
             byShop[shop] = { shop, revenue: 0, qty: 0, transactions: 0, billSet: new Set(), customerSet: new Set() };
         byShop[shop].revenue += rev;
@@ -696,6 +750,16 @@ async function parseFile(file) {
     // tối đa 1MB. Để tránh nhầm lẫn do dữ liệu bị cắt bớt âm thầm, nếu file vượt ngưỡng an toàn thì CHẶN HẲN
     // (báo lỗi, không lưu) thay vì giữ lại một phần — yêu cầu người dùng tách file nhỏ hơn rồi tải lại.
     const dailyShopProductAggFull = Object.values(byDateShopProduct);
+    // Doanh thu ghi nhận theo Mã đơn hàng cho từng Ngày×Cửa hàng×Mã sản phẩm: với mỗi mã SP, cộng tổng doanh thu
+    // (mọi dòng, mọi sản phẩm) của TẤT CẢ các đơn hàng có chứa mã SP đó — dùng cho báo cáo CTKM theo mã SP giảm giá.
+    const dailyShopProductBillRevenueAggFull = Object.entries(byDateShopProductBill).map(([key, billSet]) => {
+        const [date, shop, ...rest] = key.split("__");
+        const productCode = rest.join("__");
+        let revenue = 0;
+        for (const bid of billSet)
+            revenue += (billRevenueMap[bid] ? billRevenueMap[bid].revenue : 0);
+        return { date, shop, productCode, revenue, billCount: billSet.size };
+    });
     const dailyProductAggFull = Object.values(byDateProduct);
     const dailyProductNameAggFull = Object.values(byDateProductName).map((d) => ({
         date: d.date, productName: d.productName, qty: d.qty, revenue: d.revenue, transactions: d.transactions, shops: [...d.shopSet],
@@ -711,7 +775,7 @@ async function parseFile(file) {
     const shopProductAggFull = Object.values(byShopProduct);
     const shopCategoryAggFull = Object.values(byShopCategory);
     const dailyShopCategoryAggFull = Object.values(byDateShopCategory);
-    const CAP_DAILY_SHOP_PRODUCT = 20000, CAP_DAILY_PRODUCT = 20000, CAP_DAILY_PRODUCT_NAME = 20000, CAP_DAILY_SHOP_PRODUCT_NAME = 20000, CAP_SHOP_PRODUCT = 8000, CAP_SHOP_CATEGORY = 3000, CAP_DAILY_SHOP_CATEGORY = 10000;
+    const CAP_DAILY_SHOP_PRODUCT = 20000, CAP_DAILY_PRODUCT = 20000, CAP_DAILY_PRODUCT_NAME = 20000, CAP_DAILY_SHOP_PRODUCT_NAME = 20000, CAP_SHOP_PRODUCT = 8000, CAP_SHOP_CATEGORY = 3000, CAP_DAILY_SHOP_CATEGORY = 10000, CAP_DAILY_SHOP_PRODUCT_BILL_REVENUE = 20000;
     const overLimit = [];
     if (dailyShopProductAggFull.length > CAP_DAILY_SHOP_PRODUCT)
         overLimit.push(`Ngày×Cửa hàng×Sản phẩm (${dailyShopProductAggFull.length} tổ hợp, tối đa ${CAP_DAILY_SHOP_PRODUCT})`);
@@ -727,6 +791,8 @@ async function parseFile(file) {
         overLimit.push(`Cửa hàng×Danh mục (${shopCategoryAggFull.length} tổ hợp, tối đa ${CAP_SHOP_CATEGORY})`);
     if (dailyShopCategoryAggFull.length > CAP_DAILY_SHOP_CATEGORY)
         overLimit.push(`Ngày×Cửa hàng×Danh mục (${dailyShopCategoryAggFull.length} tổ hợp, tối đa ${CAP_DAILY_SHOP_CATEGORY})`);
+    if (dailyShopProductBillRevenueAggFull.length > CAP_DAILY_SHOP_PRODUCT_BILL_REVENUE)
+        overLimit.push(`Ngày×Cửa hàng×Mã SP (doanh thu theo đơn hàng) (${dailyShopProductBillRevenueAggFull.length} tổ hợp, tối đa ${CAP_DAILY_SHOP_PRODUCT_BILL_REVENUE})`);
     if (overLimit.length) {
         throw new Error(`File có quá nhiều tổ hợp dữ liệu chi tiết, vượt giới hạn an toàn để lưu trữ: ${overLimit.join("; ")}. Hãy tách file thành khoảng thời gian ngắn hơn (vd theo tuần thay vì theo tháng, hoặc theo từng cửa hàng) rồi tải lại từng phần.`);
     }
@@ -770,6 +836,7 @@ async function parseFile(file) {
         dailyShopProductNameAgg: dailyShopProductNameAggFull,
         dailyCustomerProductAgg,
         dailyShopProductAgg: dailyShopProductAggFull,
+        dailyShopProductBillRevenueAgg: dailyShopProductBillRevenueAggFull,
         shopProductAgg: shopProductAggFull,
         shopCategoryAgg: shopCategoryAggFull,
         dailyShopCategoryAgg: dailyShopCategoryAggFull,
@@ -1245,6 +1312,17 @@ function subscribeCategoryList(cb) {
 }
 async function saveCategoryList(names) {
     await db.collection("config").doc("categoryList").set({ names });
+}
+// Ánh xạ gom nhóm tên chương trình CTKM: { [tenChuongTrinhDaPhatHien_chuanHoa]: tenNhom }
+// Dùng để gộp nhiều biến thể tên chương trình (do dò tự động từ tên sản phẩm) về 1 tên nhóm chung do người dùng khai báo.
+function subscribeProgramNameGroups(cb) {
+    return db.collection("config").doc("programNameGroups").onSnapshot((doc) => cb(doc.exists ? doc.data() : {}));
+}
+async function saveProgramNameGroups(map) {
+    await db.collection("config").doc("programNameGroups").set(map, { merge: true });
+}
+async function clearProgramNameGroups() {
+    await db.collection("config").doc("programNameGroups").set({});
 }
 function subscribePromoPlans(cb) {
     return db.collection("promoPlans").orderBy("periodDate", "asc").onSnapshot((snap) => {
@@ -4547,13 +4625,35 @@ function collapseWhitespace(s) {
 }
 function PromoAutoView({ shopConfig }) {
     const [periods, setPeriods] = useState([]);
-    useEffect(() => { const u = subscribePeriods(setPeriods, ["dailyProductNameAgg", "dailyShopProductNameAgg", "dailyProductAgg", "dailyShopProductAgg", "shopAgg"]); return () => u(); }, []);
+    useEffect(() => { const u = subscribePeriods(setPeriods, ["dailyProductNameAgg", "dailyShopProductNameAgg", "dailyProductAgg", "dailyShopProductAgg", "shopAgg", "dailyShopProductBillRevenueAgg"]); return () => u(); }, []);
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
     const [shopFilter, setShopFilter] = useState("__ALL__");
     const [aiLoading, setAiLoading] = useState(false);
     const [aiError, setAiError] = useState(null);
     const [aiResult, setAiResult] = useState(null);
+    const [reportShopFilter, setReportShopFilter] = useState([]); // rỗng = hiển thị tất cả cửa hàng
+    // Ánh xạ gom nhóm tên chương trình (do người dùng tải file lên): { tenDaPhatHien_chuanHoa: tenNhom }
+    const [programNameGroups, setProgramNameGroups] = useState({});
+    const [groupMapUploading, setGroupMapUploading] = useState(false);
+    const [groupMapError, setGroupMapError] = useState(null);
+    useEffect(() => { const u = subscribeProgramNameGroups(setProgramNameGroups); return () => u(); }, []);
+    async function handleGroupMapFile(file) {
+        setGroupMapError(null);
+        setGroupMapUploading(true);
+        try {
+            const map = await parseProgramNameGroupFile(file);
+            await saveProgramNameGroups(map);
+        } catch (e) {
+            setGroupMapError(e.message || "Không đọc được file.");
+            throw e;
+        } finally {
+            setGroupMapUploading(false);
+        }
+    }
+    function mapProgramName(name) {
+        return programNameGroups[collapseWhitespace(name || "").toLowerCase()] || name;
+    }
     const allShops = useMemo(() => {
         const s = new Set(DEFAULT_SHOPS);
         for (const p of periods) for (const r of (p.shopAgg || [])) s.add(r.shop);
@@ -4596,15 +4696,28 @@ function PromoAutoView({ shopConfig }) {
             g.dates.push(r.date);
             (r.shops || []).forEach((s) => g.shopSet.add(s));
         }
-        return Object.values(acc).map((g) => {
+        const preGroups = Object.values(acc).map((g) => {
             const bestName = Object.entries(g.nameVariants).sort((a, b) => b[1] - a[1])[0][0];
             const dates = g.dates.sort();
             return {
                 name: bestName, qty: g.qty, revenue: g.revenue, transactions: g.transactions,
                 fromDate: dates[0], toDate: dates[dates.length - 1], shops: [...g.shopSet],
             };
-        }).sort((a, b) => (b.qty - a.qty) || (b.revenue - a.revenue));
-    }, [rawRows]);
+        });
+        // Áp dụng ánh xạ gom nhóm tên chương trình do người dùng tải lên (nếu có) — gộp thêm 1 lần nữa theo Tên nhóm
+        const acc2 = {};
+        for (const g of preGroups) {
+            const mapped = mapProgramName(g.name);
+            if (!acc2[mapped]) acc2[mapped] = { name: mapped, qty: 0, revenue: 0, transactions: 0, fromDate: null, toDate: null, shopSet: new Set() };
+            const gg = acc2[mapped];
+            gg.qty += g.qty; gg.revenue += g.revenue; gg.transactions += g.transactions;
+            if (!gg.fromDate || g.fromDate < gg.fromDate) gg.fromDate = g.fromDate;
+            if (!gg.toDate || g.toDate > gg.toDate) gg.toDate = g.toDate;
+            (g.shops || []).forEach((s) => gg.shopSet.add(s));
+        }
+        return Object.values(acc2).map((gg) => ({ ...gg, shops: [...gg.shopSet] }))
+            .sort((a, b) => (b.qty - a.qty) || (b.revenue - a.revenue));
+    }, [rawRows, programNameGroups]);
     const totalQty = groups.reduce((s, g) => s + g.qty, 0);
     const totalRevenue = groups.reduce((s, g) => s + g.revenue, 0);
     const ready = groups.length > 0;
@@ -4635,17 +4748,28 @@ function PromoAutoView({ shopConfig }) {
             g.revenue += r.revenue;
             g.transactions += r.transactions || 0;
         }
-        return Object.values(acc).map((g) => ({
+        const preGroupsByShop = Object.values(acc).map((g) => ({
             shop: g.shop,
             name: Object.entries(g.nameVariants).sort((a, b) => b[1] - a[1])[0][0],
             qty: g.qty, revenue: g.revenue, transactions: g.transactions,
-        })).sort((a, b) => a.shop.localeCompare(b.shop) || (b.qty - a.qty));
-    }, [rawRowsByShop]);
+        }));
+        // Áp dụng ánh xạ gom nhóm tên chương trình do người dùng tải lên (nếu có)
+        const acc2 = {};
+        for (const g of preGroupsByShop) {
+            const mapped = mapProgramName(g.name);
+            const key = `${g.shop}__${mapped}`;
+            if (!acc2[key]) acc2[key] = { shop: g.shop, name: mapped, qty: 0, revenue: 0, transactions: 0 };
+            acc2[key].qty += g.qty;
+            acc2[key].revenue += g.revenue;
+            acc2[key].transactions += g.transactions;
+        }
+        return Object.values(acc2).sort((a, b) => a.shop.localeCompare(b.shop) || (b.qty - a.qty));
+    }, [rawRowsByShop, programNameGroups]);
     // Chi phí giảm giá trực tiếp ước tính theo từng Cửa hàng x Chương trình (từ các dòng doanh thu âm, giống costBreakdown nhưng tách theo shop)
     const costByShopProgram = useMemo(() => {
         const acc = {};
         for (const r of rawRowsByShop) {
-            const nameKey = collapseWhitespace(r.productName).toLowerCase();
+            const nameKey = collapseWhitespace(mapProgramName(r.productName)).toLowerCase();
             if (!nameKey) continue;
             const key = `${r.shop}__${nameKey}`;
             if (!acc[key]) acc[key] = { discountCost: 0, giftQty: 0 };
@@ -4653,7 +4777,7 @@ function PromoAutoView({ shopConfig }) {
             else if (r.revenue === 0) acc[key].giftQty += r.qty || 0;
         }
         return acc;
-    }, [rawRowsByShop]);
+    }, [rawRowsByShop, programNameGroups]);
     // Chi phí khuyến mại: giảm giá trực tiếp (doanh thu âm) tính ra tiền; tặng quà (doanh thu = 0) chỉ đếm số lượng vì chưa có dữ liệu giá tham chiếu
     const costBreakdown = useMemo(() => {
         let discountCost = 0, giftQty = 0, giftTransactions = 0;
@@ -4690,7 +4814,8 @@ function PromoAutoView({ shopConfig }) {
             setSkuUploading(false);
         }
     }
-    // Gộp số lượng bán ra theo Mã sản phẩm trong khoảng ngày đang lọc (không phân biệt cửa hàng, vì dailyProductAgg không có cột Cửa hàng)
+    // Gộp số lượng bán ra theo Mã sản phẩm, cả tổng toàn hệ thống lẫn tách theo từng Cửa hàng (để lọc đúng khi 1 mã SP
+    // được dùng chung bởi nhiều chương trình nhắm tới các nhóm cửa hàng khác nhau)
     const qtyByProductCode = useMemo(() => {
         const map = {};
         for (const p of periods) {
@@ -4706,15 +4831,74 @@ function PromoAutoView({ shopConfig }) {
         }
         return map;
     }, [periods, fromDate, toDate]);
-    // Đối chiếu danh sách mã SP với số lượng bán thực tế, tính chi phí giảm giá chính xác theo giá gốc - giá sau giảm, gộp theo Tên CTKM
-    const skuCostByCtkm = useMemo(() => {
+    const qtyByShopAndProductCode = useMemo(() => {
+        const map = {};
+        for (const p of periods) {
+            if (!p.dailyShopProductAgg)
+                continue;
+            for (const r of p.dailyShopProductAgg) {
+                if (fromDate && r.date < fromDate)
+                    continue;
+                if (toDate && r.date > toDate)
+                    continue;
+                const key = `${r.shop}__${r.productCode}`;
+                map[key] = (map[key] || 0) + (r.qty || 0);
+            }
+        }
+        return map;
+    }, [periods, fromDate, toDate]);
+    // SL bán ra của 1 mã SP: nếu chương trình có khai báo "Cửa hàng áp dụng", chỉ cộng đúng các shop đó (tránh trùng số
+    // giữa nhiều chương trình dùng chung mã SP nhưng nhắm tới nhóm cửa hàng khác nhau); nếu không khai báo, lấy tổng toàn hệ thống.
+    function qtyForSkuItem(it) {
+        if (it.shops && it.shops.length > 0) {
+            return it.shops.reduce((sum, shop) => sum + (qtyByShopAndProductCode[`${shop}__${it.code}`] || 0), 0);
+        }
+        return qtyByProductCode[it.code] || 0;
+    }
+    // Bỏ hậu tố khu vực/đợt khai trương khỏi tên CTKM (vd "Combo HS1 - Toàn khu vực" / "Combo HS1 - Khai trương NT121-122"
+    // đều quy về "Combo HS1"), để các mã SP trùng nhau giữa 2 tên chương trình được gộp làm một, tránh đếm trùng chi phí.
+    function baseProgramName(name) {
+        const s = collapseWhitespace(name || "");
+        const low = s.toLowerCase();
+        const m = low.match(/^(.*?)\s*-\s*(toàn khu vực|khai trương)[\s\S]*$/);
+        return m ? s.slice(0, m[1].length).trim() : s;
+    }
+    // Gộp danh sách mã SP theo Mã sản phẩm: nếu cùng 1 mã SP xuất hiện ở nhiều dòng/nhiều tên CTKM khác nhau
+    // (thường do khai theo từng khu vực/đợt khai trương), chỉ giữ lại 1 dòng duy nhất với tên gốc đã bỏ hậu tố,
+    // để phía dưới chỉ tính chi phí giảm giá 1 lần cho mỗi mã SP thay vì tính lặp cho từng tên chương trình.
+    const dedupedSkuItems = useMemo(() => {
         const allItems = [];
         for (const list of skuLists)
             for (const it of (list.items || []))
                 allItems.push(it);
         const acc = {};
         for (const it of allItems) {
-            const qty = qtyByProductCode[it.code] || 0;
+            const code = (it.code || "").trim();
+            if (!code) continue;
+            if (!acc[code]) {
+                acc[code] = {
+                    code, originalPrice: it.originalPrice, discountPrice: it.discountPrice,
+                    names: new Set(), shopsAll: false, shopsSet: new Set(),
+                };
+            }
+            const g = acc[code];
+            g.names.add(baseProgramName(it.ctkmName) || "Giảm giá trực tiếp theo mã SP");
+            if (!it.shops || it.shops.length === 0)
+                g.shopsAll = true;
+            else
+                it.shops.forEach((s) => g.shopsSet.add(s));
+        }
+        return Object.values(acc).map((g) => ({
+            code: g.code, originalPrice: g.originalPrice, discountPrice: g.discountPrice,
+            ctkmName: [...g.names].sort((a, b) => b.length - a.length)[0],
+            shops: g.shopsAll ? [] : [...g.shopsSet],
+        }));
+    }, [skuLists]);
+    // Đối chiếu danh sách mã SP với số lượng bán thực tế, tính chi phí giảm giá chính xác theo giá gốc - giá sau giảm, gộp theo Tên CTKM
+    const skuCostByCtkm = useMemo(() => {
+        const acc = {};
+        for (const it of dedupedSkuItems) {
+            const qty = qtyForSkuItem(it);
             const unitDiscount = Math.max(0, (it.originalPrice || 0) - (it.discountPrice || 0));
             const cost = qty * unitDiscount;
             const key = it.ctkmName || "Giảm giá trực tiếp theo mã SP";
@@ -4725,7 +4909,7 @@ function PromoAutoView({ shopConfig }) {
             acc[key].cost += cost;
         }
         return Object.values(acc).sort((a, b) => b.cost - a.cost);
-    }, [skuLists, qtyByProductCode]);
+    }, [dedupedSkuItems, qtyByProductCode, qtyByShopAndProductCode]);
     const skuTotalCost = skuCostByCtkm.reduce((s, g) => s + g.cost, 0);
     // Chi phí theo danh sách mã SP (giá gốc/giá sau giảm) tách theo từng Cửa hàng, dùng dailyShopProductAgg
     const qtyByShopProductCode = useMemo(() => {
@@ -4742,27 +4926,50 @@ function PromoAutoView({ shopConfig }) {
         }
         return map;
     }, [periods, shopFilter, fromDate, toDate]);
+    // Doanh thu ghi nhận theo Mã đơn hàng cho mỗi Cửa hàng×Mã SP: mã giảm giá xuất hiện ở đơn hàng nào thì cộng
+    // tổng doanh số điều chỉnh (tất cả các dòng) của đơn hàng đó, để ra doanh thu ghi nhận cho mã SP/chương trình.
+    const billRevenueByShopProductCode = useMemo(() => {
+        const map = {};
+        for (const p of periods) {
+            if (!p.dailyShopProductBillRevenueAgg) continue;
+            for (const r of p.dailyShopProductBillRevenueAgg) {
+                if (shopFilter !== "__ALL__" && r.shop !== shopFilter) continue;
+                if (fromDate && r.date < fromDate) continue;
+                if (toDate && r.date > toDate) continue;
+                const key = `${r.shop}__${r.productCode}`;
+                if (!map[key]) map[key] = { revenue: 0, billCount: 0 };
+                map[key].revenue += r.revenue || 0;
+                map[key].billCount += r.billCount || 0;
+            }
+        }
+        return map;
+    }, [periods, shopFilter, fromDate, toDate]);
     const skuShopBreakdown = useMemo(() => {
         const allShops = new Set();
         for (const p of periods) for (const r of (p.shopAgg || [])) allShops.add(r.shop);
-        const allItems = [];
-        for (const list of skuLists) for (const it of (list.items || [])) allItems.push(it);
         const rows = [];
         for (const shop of allShops) {
             const acc = {};
-            for (const it of allItems) {
+            for (const it of dedupedSkuItems) {
+                // Nếu chương trình có khai báo Cửa hàng áp dụng mà shop này không nằm trong đó thì bỏ qua, tránh tính trùng
+                if (it.shops && it.shops.length > 0 && !it.shops.includes(shop))
+                    continue;
                 const qty = qtyByShopProductCode[`${shop}__${it.code}`] || 0;
                 if (!qty) continue;
                 const unitDiscount = Math.max(0, (it.originalPrice || 0) - (it.discountPrice || 0));
                 const key = it.ctkmName || "Giảm giá trực tiếp theo mã SP";
-                if (!acc[key]) acc[key] = { shop, name: key, qty: 0, cost: 0 };
+                if (!acc[key]) acc[key] = { shop, name: key, qty: 0, cost: 0, revenue: 0 };
                 acc[key].qty += qty;
                 acc[key].cost += qty * unitDiscount;
+                // Doanh thu ghi nhận: cộng tổng doanh số điều chỉnh của các đơn hàng có chứa mã SP này (mã giảm giá
+                // xuất hiện ở đơn nào thì lấy đúng tổng doanh thu của đơn đó, không phải chỉ dòng giảm giá).
+                const revInfo = billRevenueByShopProductCode[`${shop}__${it.code}`];
+                if (revInfo) acc[key].revenue += revInfo.revenue;
             }
             rows.push(...Object.values(acc));
         }
         return rows.sort((a, b) => a.shop.localeCompare(b.shop) || (b.cost - a.cost));
-    }, [periods, skuLists, qtyByShopProductCode]);
+    }, [periods, dedupedSkuItems, qtyByShopProductCode, billRevenueByShopProductCode]);
     // ---- Gộp báo cáo cuối cùng: Cửa hàng x Tên chương trình -> Doanh thu, Chi phí, SL sử dụng ----
     const shopProgramReport = useMemo(() => {
         const acc = {};
@@ -4773,7 +4980,8 @@ function PromoAutoView({ shopConfig }) {
         }
         for (const r of skuShopBreakdown) {
             const key = `${r.shop}__${r.name}`;
-            if (!acc[key]) acc[key] = { shop: r.shop, name: r.name, qty: 0, revenue: 0, cost: 0 };
+            if (!acc[key]) acc[key] = { shop: r.shop, name: r.name, qty: 0, revenue: r.revenue || 0, cost: 0 };
+            else if (!acc[key].revenue) acc[key].revenue = r.revenue || 0; // chỉ điền nếu chưa có doanh thu từ nguồn dò tên sản phẩm
             acc[key].qty += r.qty;
             acc[key].cost += r.cost;
         }
@@ -4873,6 +5081,22 @@ function PromoAutoView({ shopConfig }) {
         React.createElement("div", { key: "hint", style: { fontSize: 12, color: COLORS.inkSoft } }, "App tự dò các dòng trong cột \"Tên sản phẩm\" của file doanh thu có chứa từ khoá CTKM/Voucher/Coupon/Khuyến mãi/Tặng quà/Ưu đãi, rồi gộp thành từng chương trình. Không cần nhập tay mã sản phẩm."),
     ]);
 
+    const groupMapCount = Object.keys(programNameGroups).length;
+    const groupMapCard = React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20 } }, [
+        React.createElement("div", { key: "t", style: titleStyle }, "Gom nhóm tên chương trình"),
+        React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Tải file Excel/CSV gồm 2 cột: cột A = Tên chương trình đã phát hiện (đúng như hiển thị trong danh sách bên dưới), cột B = Tên nhóm muốn gộp về. Nhiều tên chương trình có thể trỏ về cùng 1 tên nhóm — app sẽ tự gộp SL/doanh thu/chi phí theo tên nhóm ở mọi bảng báo cáo bên dưới."),
+        React.createElement("div", { key: "row", style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } }, [
+            React.createElement(UploadStager, { key: "up", onConfirm: (file) => handleGroupMapFile(file), buttonLabel: groupMapUploading ? "Đang xử lý..." : "Tải file gom nhóm lên", dropzoneTitle: "Kéo thả file gom nhóm vào đây", dropzoneHint: 'File cần cột A = Tên chương trình, cột B = Tên nhóm.', showDropzone: false, showLabelInput: false }),
+            groupMapCount > 0 && React.createElement("span", { key: "cnt", style: { fontSize: 12, color: COLORS.inkSoft } }, `Đang áp dụng ${groupMapCount} dòng ánh xạ.`),
+            groupMapCount > 0 && React.createElement("button", {
+                key: "clear",
+                onClick: async () => { if (window.confirm("Xoá toàn bộ ánh xạ gom nhóm tên chương trình?")) await clearProgramNameGroups(); },
+                style: { padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", border: `1px solid ${COLORS.line}`, background: COLORS.card, color: COLORS.clay },
+            }, "Xoá ánh xạ"),
+        ]),
+        groupMapError && React.createElement("div", { key: "err", style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginTop: 12 } }, groupMapError),
+    ]);
+
     const planCard = React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20 } }, [
         React.createElement("div", { key: "t", style: titleStyle }, "Kế hoạch chạy khuyến mại của tháng"),
         React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Tải file Excel liệt kê các chương trình dự kiến chạy trong tháng (cần cột \"Tên CTKM\"/\"Tên chương trình\", có thể kèm \"Cơ chế\", \"Từ ngày\", \"Đến ngày\", \"Đối tượng/Cửa hàng áp dụng\") để đối chiếu với dữ liệu thực tế đã phát hiện ở trên."),
@@ -4883,7 +5107,7 @@ function PromoAutoView({ shopConfig }) {
 
     const skuCard = React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20 } }, [
         React.createElement("div", { key: "t", style: titleStyle }, "Danh sách mã sản phẩm giảm giá trực tiếp / combo"),
-        React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Tải file Excel gồm \"Mã sản phẩm\", \"Giá gốc\", \"Giá sau giảm\", và \"Tên CTKM\" (tuỳ chọn — để trống sẽ gộp chung vào nhóm \"Giảm giá trực tiếp theo mã SP\"). App sẽ đối chiếu với số lượng bán ra thực tế của từng mã (trong khoảng thời gian đang lọc ở trên) để tính chính xác số tiền đã giảm, thay vì chỉ ước tính từ dòng doanh thu âm."),
+        React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Tải file Excel gồm \"Mã sản phẩm\", \"Giá gốc\", \"Giá sau giảm\", \"Tên CTKM\" (tuỳ chọn) và \"Cửa hàng áp dụng\" (tuỳ chọn, nhiều mã cách nhau bằng dấu phẩy — để trống nghĩa là áp dụng TẤT CẢ cửa hàng). Nên khai báo Cửa hàng áp dụng nếu cùng 1 mã SP được dùng cho nhiều chương trình khác nhau ở các nhóm cửa hàng khác nhau, để tránh tính trùng số lượng bán ra."),
         React.createElement(UploadStager, { onConfirm: (file, label, periodDate) => handleSkuFile(file, label, periodDate), buttonLabel: skuUploading ? "Đang xử lý..." : "Tải danh sách mã SP lên", dropzoneTitle: "Kéo thả file danh sách mã SP vào đây", dropzoneHint: 'File cần có cột "Mã sản phẩm", "Giá gốc", "Giá sau giảm".', showDropzone: false, showLabelInput: true }),
         skuError && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginTop: 12 } }, skuError),
         React.createElement(ManageFilesCard, { title: "danh sách mã SP đã tải", items: skuLists, onDelete: deletePromoSkuList }),
@@ -4909,9 +5133,77 @@ function PromoAutoView({ shopConfig }) {
         ]),
     ]);
 
+    // Danh sách cửa hàng thực tế xuất hiện trong báo cáo (để render nút lọc)
+    const reportAllShops = useMemo(() => [...new Set(shopProgramReport.map((r) => r.shop))].sort(), [shopProgramReport]);
+    function toggleReportShop(shop) {
+        setReportShopFilter((prev) => prev.includes(shop) ? prev.filter((s) => s !== shop) : [...prev, shop]);
+    }
+    // Áp dụng nút lọc cửa hàng riêng của bảng này (độc lập với Bộ lọc chung ở trên); rỗng = hiển thị tất cả
+    const shopProgramReportFiltered = useMemo(() => {
+        if (reportShopFilter.length === 0) return shopProgramReport;
+        return shopProgramReport.filter((r) => reportShopFilter.includes(r.shop));
+    }, [shopProgramReport, reportShopFilter]);
+    // Bảng tổng: gộp theo Tên chương trình, cộng dồn qua các cửa hàng đang được lọc
+    const programTotalReport = useMemo(() => {
+        const acc = {};
+        for (const r of shopProgramReportFiltered) {
+            if (!acc[r.name]) acc[r.name] = { name: r.name, qty: 0, revenue: 0, cost: 0, shopCount: 0, shopSet: new Set() };
+            acc[r.name].qty += r.qty;
+            acc[r.name].revenue += r.revenue;
+            acc[r.name].cost += r.cost;
+            acc[r.name].shopSet.add(r.shop);
+        }
+        return Object.values(acc).map((g) => ({ ...g, shopCount: g.shopSet.size }))
+            .sort((a, b) => (b.cost - a.cost) || (b.qty - a.qty));
+    }, [shopProgramReportFiltered]);
+    const reportShopFilterBar = React.createElement("div", { key: "shopFilterBar", style: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 } }, [
+        React.createElement("button", {
+            key: "__ALL__", onClick: () => setReportShopFilter([]),
+            style: {
+                padding: "5px 12px", borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: `1px solid ${reportShopFilter.length === 0 ? COLORS.pine : COLORS.line}`,
+                background: reportShopFilter.length === 0 ? COLORS.pineSoft : COLORS.card,
+                color: reportShopFilter.length === 0 ? COLORS.pine : COLORS.inkSoft,
+            },
+        }, "Tất cả cửa hàng"),
+        ...reportAllShops.map((shop) => {
+            const active = reportShopFilter.includes(shop);
+            return React.createElement("button", {
+                key: shop, onClick: () => toggleReportShop(shop),
+                style: {
+                    padding: "5px 12px", borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    border: `1px solid ${active ? COLORS.pine : COLORS.line}`,
+                    background: active ? COLORS.pineSoft : COLORS.card,
+                    color: active ? COLORS.pine : COLORS.inkSoft,
+                },
+            }, shop);
+        }),
+    ]);
+    const programTotalCard = programTotalReport.length > 0 ? React.createElement("div", { key: "totalWrap", style: { marginBottom: 18 } }, [
+        React.createElement("div", { key: "tt", style: { fontSize: 13, fontWeight: 700, color: COLORS.ink, marginBottom: 8 } }, `Bảng tổng theo Chương trình (gộp tất cả cửa hàng đang lọc, ${programTotalReport.length} chương trình)`),
+        React.createElement("div", { key: "wrap", style: { maxHeight: 320, overflowY: "auto", border: `1px solid ${COLORS.line}`, borderRadius: 10 } },
+            React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } }, [
+                React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase", position: "sticky", top: 0, background: COLORS.card } }, [
+                    React.createElement("th", { key: "n", style: { padding: "8px" } }, "Tên chương trình"),
+                    React.createElement("th", { key: "sc", style: { padding: "8px", textAlign: "right" } }, "Số cửa hàng"),
+                    React.createElement("th", { key: "q", style: { padding: "8px", textAlign: "right" } }, "SL sử dụng"),
+                    React.createElement("th", { key: "r", style: { padding: "8px", textAlign: "right" } }, "Doanh thu ghi nhận"),
+                    React.createElement("th", { key: "c", style: { padding: "8px", textAlign: "right" } }, "Chi phí"),
+                ])),
+                React.createElement("tbody", { key: "b" }, programTotalReport.map((r, i) => React.createElement("tr", { key: i, style: { borderTop: `1px solid ${COLORS.line}` } }, [
+                    React.createElement("td", { key: "n", style: { padding: "8px", fontWeight: 600, maxWidth: 320 } }, r.name),
+                    React.createElement("td", { key: "sc", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.shopCount)),
+                    React.createElement("td", { key: "q", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.qty)),
+                    React.createElement("td", { key: "r", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.revenue)),
+                    React.createElement("td", { key: "c", style: { padding: "8px", textAlign: "right", color: r.cost > 0 ? COLORS.clay : COLORS.inkSoft, fontWeight: r.cost > 0 ? 600 : 400 } }, r.cost > 0 ? fmtVND(r.cost) : "—"),
+                ]))),
+            ])),
+    ]) : null;
     const reportByShopCard = shopProgramReport.length > 0 ? React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20 } }, [
         React.createElement("div", { key: "t", style: titleStyle }, `Báo cáo đánh giá theo Cửa hàng × Chương trình (${shopProgramReport.length} dòng)`),
-        React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Gộp từ cả 2 nguồn: dò theo tên sản phẩm (doanh thu, SL) và danh sách mã SP giảm giá (chi phí chính xác theo giá gốc/giá sau giảm nếu có tải lên). Không phụ thuộc bộ lọc Cửa hàng ở trên — luôn hiển thị đủ tất cả cửa hàng."),
+        React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Gộp từ cả 2 nguồn: dò theo tên sản phẩm (doanh thu, SL) và danh sách mã SP giảm giá (chi phí chính xác theo giá gốc/giá sau giảm nếu có tải lên). Nút lọc cửa hàng bên dưới độc lập với Bộ lọc chung ở trên."),
+        programTotalCard,
+        reportShopFilterBar,
         React.createElement("div", { key: "wrap", style: { maxHeight: 480, overflowY: "auto", border: `1px solid ${COLORS.line}`, borderRadius: 10 } },
             React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } }, [
                 React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase", position: "sticky", top: 0, background: COLORS.card } }, [
@@ -4921,7 +5213,7 @@ function PromoAutoView({ shopConfig }) {
                     React.createElement("th", { key: "r", style: { padding: "8px", textAlign: "right" } }, "Doanh thu ghi nhận"),
                     React.createElement("th", { key: "c", style: { padding: "8px", textAlign: "right" } }, "Chi phí"),
                 ])),
-                React.createElement("tbody", { key: "b" }, shopProgramReport.map((r, i) => React.createElement("tr", { key: i, style: { borderTop: `1px solid ${COLORS.line}` } }, [
+                React.createElement("tbody", { key: "b" }, shopProgramReportFiltered.map((r, i) => React.createElement("tr", { key: i, style: { borderTop: `1px solid ${COLORS.line}` } }, [
                     React.createElement("td", { key: "s", style: { padding: "8px", fontWeight: 600 } }, r.shop),
                     React.createElement("td", { key: "n", style: { padding: "8px", maxWidth: 320 } }, r.name),
                     React.createElement("td", { key: "q", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.qty)),
@@ -5020,6 +5312,7 @@ function PromoAutoView({ shopConfig }) {
 
     return React.createElement(React.Fragment, null, [
         React.createElement(React.Fragment, { key: "filter" }, filterCard),
+        React.createElement(React.Fragment, { key: "groupmap" }, groupMapCard),
         React.createElement(React.Fragment, { key: "plan" }, planCard),
         React.createElement(React.Fragment, { key: "sku" }, skuCard),
         reportByShopCard && React.createElement(React.Fragment, { key: "byshop" }, reportByShopCard),
