@@ -1743,7 +1743,7 @@ function RevenueView({ shopConfig }) {
     const [deletingId, setDeletingId] = useState(null);
     useEffect(() => {
         const unsub = subscribePeriods((list) => { setPeriods(list); if (!selectedId && list.length)
-            setSelectedId(list[list.length - 1].id); }, ["shopAgg", "dailyShopAgg", "dailyShopCategoryAgg", "dailyShopProductAgg", "dailyProductAgg", "shopCategoryAgg", "shopProductAgg"]);
+            setSelectedId(list[list.length - 1].id); }, ["shopAgg", "dailyShopAgg", "dailyShopCategoryAgg", "dailyShopProductAgg", "dailyProductAgg", "shopCategoryAgg", "shopProductAgg", "timeseries"]);
         const unsub2 = subscribeProductCoefficients(setCoefficients);
         const unsub3 = subscribeProductCategories(setCategoryMap);
         const unsub4 = subscribeInventory(setInvSnapshots);
@@ -2784,8 +2784,8 @@ function CategoryView() {
                     name: nameCol ? ((_e = r[nameCol]) !== null && _e !== void 0 ? _e : "").toString().trim() : "",
                     trangThai: trangThaiCol ? (r[trangThaiCol] !== null && r[trangThaiCol] !== void 0 ? r[trangThaiCol] : "").toString().trim() : "",
                 };
-                if (!(entry.nganh || entry.nhom || entry.loai))
-                    continue;
+                // Vẫn thêm mã vào danh mục dù thiếu cả 3 cột Ngành/Nhóm/Phân loại — chỉ để trống các cột đó,
+                // để không bỏ sót mã nào khi tải file DMHH lên (khớp đúng tổng số dòng trong file gốc)
                 // Nhiều dòng có thể trùng mã (khác lô/quy cách) — chỉ ghi đè từng trường khi dòng mới có giá trị, không xóa mất dữ liệu đã có
                 if (!updates[c])
                     updates[c] = { nganh: "", nhom: "", loai: "", name: "", trangThai: "" };
