@@ -383,6 +383,47 @@ async function parsePromoPlanFile(file) {
         throw new Error("Không có dòng chương trình nào hợp lệ trong file.");
     return items;
 }
+// Đọc file danh sách mã sản phẩm giảm giá trực tiếp/combo: Mã SP, Giá gốc, Giá sau giảm, Tên CTKM
+async function parsePromoSkuFile(file) {
+    let rows = await readRowsBestSheet(file, (headers) => {
+        const n = headers.map(norm);
+        let score = 0;
+        if (n.some((h) => ["masanpham", "mahang", "masp"].some((hint) => h.includes(hint))))
+            score++;
+        if (n.some((h) => ["giagoc", "giaban", "giaban1", "giaban2", "giaban3"].some((hint) => h.includes(hint))))
+            score++;
+        return score;
+    });
+    if (!rows.length)
+        throw new Error("File trống.");
+    const headers = Object.keys(rows[0]);
+    const codeCol = headers.find((h) => { const n = norm(h); return n.includes("masanpham") || n.includes("mahang") || n.includes("masp"); });
+    const originalPriceCol = headers.find((h) => { const n = norm(h); return n.includes("giagoc") || n.includes("gianiemyet") || n.includes("giabanle"); });
+    const discountPriceCol = headers.find((h) => { const n = norm(h); return (n.includes("giasaugiam") || n.includes("giakhuyenmai") || n.includes("giakm") || n.includes("giaban")) && !n.includes("goc"); });
+    const nameCol = headers.find((h) => { const n = norm(h); return n.includes("tenctkm") || n.includes("tenchuongtrinh") || n.includes("chuongtrinh"); });
+    if (!codeCol) {
+        throw new Error('Cần có cột "Mã sản phẩm".');
+    }
+    if (!originalPriceCol || !discountPriceCol) {
+        throw new Error('Cần có cột "Giá gốc" và "Giá sau giảm".');
+    }
+    const items = [];
+    for (const r of rows) {
+        var _a, _b, _c, _d;
+        const code = ((_a = r[codeCol]) !== null && _a !== void 0 ? _a : "").toString().trim().toUpperCase();
+        if (!code)
+            continue;
+        const originalPrice = parseNumber(r[originalPriceCol]);
+        const discountPrice = parseNumber(r[discountPriceCol]);
+        items.push({
+            code, originalPrice, discountPrice,
+            ctkmName: nameCol ? ((_b = r[nameCol]) !== null && _b !== void 0 ? _b : "").toString().trim() || "Giảm giá trực tiếp theo mã SP" : "Giảm giá trực tiếp theo mã SP",
+        });
+    }
+    if (!items.length)
+        throw new Error("Không có dòng mã sản phẩm nào hợp lệ trong file.");
+    return items;
+}
 async function parseFile(file) {
     var _a, _b, _c, _d, _e, _f, _g, _h;
     let rows = await readRowsBestSheet(file, (headers) => {
@@ -419,7 +460,7 @@ async function parseFile(file) {
     if (!colMap.shop || !colMap.revenue) {
         throw new Error("Không nhận diện được cột Mã cửa hàng và/hoặc Doanh thu. Kiểm tra lại tiêu đề cột.");
     }
-    const byShop = {}, byDate = {}, byCategory = {}, byProduct = {}, byDateShop = {}, byEmployee = {}, byCustomerProduct = {}, byDateEmployee = {}, byBill = {}, byCustomer = {}, byEmployeeProduct = {}, byDateProduct = {}, byDateShopProduct = {}, byShopProduct = {}, byShopCategory = {}, byDateShopCategory = {}, byDateProductName = {}, byDateCustomerProduct = {};
+    const byShop = {}, byDate = {}, byCategory = {}, byProduct = {}, byDateShop = {}, byEmployee = {}, byCustomerProduct = {}, byDateEmployee = {}, byBill = {}, byCustomer = {}, byEmployeeProduct = {}, byDateProduct = {}, byDateShopProduct = {}, byShopProduct = {}, byShopCategory = {}, byDateShopCategory = {}, byDateProductName = {}, byDateShopProductName = {}, byDateCustomerProduct = {};
     let rowCount = 0;
     const hasBillId = !!colMap.billId, hasCustomerId = !!colMap.customerId, hasProductCode = !!colMap.productCode, hasProductName = !!colMap.productName, hasEmployee = !!colMap.employeeCode || !!colMap.employeeName;
     const skuTrackable = hasBillId && hasProductCode;
@@ -575,6 +616,12 @@ async function parseFile(file) {
                 byDateProductName[dnKey].revenue += rev;
                 byDateProductName[dnKey].transactions += 1;
                 byDateProductName[dnKey].shopSet.add(shop);
+                const dspnKey = `${key}__${shop}__${productName}`;
+                if (!byDateShopProductName[dspnKey])
+                    byDateShopProductName[dspnKey] = { date: key, shop, productName, qty: 0, revenue: 0, transactions: 0 };
+                byDateShopProductName[dspnKey].qty += qty;
+                byDateShopProductName[dspnKey].revenue += rev;
+                byDateShopProductName[dspnKey].transactions += 1;
             }
             if (customerId && productCode) {
                 const dcpKey = `${key}__${customerId}__${productCode}`;
@@ -653,6 +700,7 @@ async function parseFile(file) {
     const dailyProductNameAggFull = Object.values(byDateProductName).map((d) => ({
         date: d.date, productName: d.productName, qty: d.qty, revenue: d.revenue, transactions: d.transactions, shops: [...d.shopSet],
     }));
+    const dailyShopProductNameAggFull = Object.values(byDateShopProductName);
     // Ngày×Khách hàng×Sản phẩm — dùng để gợi ý "sản phẩm mua kèm" cho khách mua thuốc mạn tính.
     // KHÔNG chặn upload nếu vượt giới hạn — chỉ cắt bớt (mất 1 phần gợi ý mua kèm, không ảnh hưởng các số liệu khác).
     const CAP_DAILY_CUSTOMER_PRODUCT = 40000;
@@ -663,7 +711,7 @@ async function parseFile(file) {
     const shopProductAggFull = Object.values(byShopProduct);
     const shopCategoryAggFull = Object.values(byShopCategory);
     const dailyShopCategoryAggFull = Object.values(byDateShopCategory);
-    const CAP_DAILY_SHOP_PRODUCT = 20000, CAP_DAILY_PRODUCT = 20000, CAP_DAILY_PRODUCT_NAME = 20000, CAP_SHOP_PRODUCT = 8000, CAP_SHOP_CATEGORY = 3000, CAP_DAILY_SHOP_CATEGORY = 10000;
+    const CAP_DAILY_SHOP_PRODUCT = 20000, CAP_DAILY_PRODUCT = 20000, CAP_DAILY_PRODUCT_NAME = 20000, CAP_DAILY_SHOP_PRODUCT_NAME = 20000, CAP_SHOP_PRODUCT = 8000, CAP_SHOP_CATEGORY = 3000, CAP_DAILY_SHOP_CATEGORY = 10000;
     const overLimit = [];
     if (dailyShopProductAggFull.length > CAP_DAILY_SHOP_PRODUCT)
         overLimit.push(`Ngày×Cửa hàng×Sản phẩm (${dailyShopProductAggFull.length} tổ hợp, tối đa ${CAP_DAILY_SHOP_PRODUCT})`);
@@ -671,6 +719,8 @@ async function parseFile(file) {
         overLimit.push(`Ngày×Sản phẩm (${dailyProductAggFull.length} tổ hợp, tối đa ${CAP_DAILY_PRODUCT})`);
     if (dailyProductNameAggFull.length > CAP_DAILY_PRODUCT_NAME)
         overLimit.push(`Ngày×Tên sản phẩm (${dailyProductNameAggFull.length} tổ hợp, tối đa ${CAP_DAILY_PRODUCT_NAME})`);
+    if (dailyShopProductNameAggFull.length > CAP_DAILY_SHOP_PRODUCT_NAME)
+        overLimit.push(`Ngày×Cửa hàng×Tên sản phẩm (${dailyShopProductNameAggFull.length} tổ hợp, tối đa ${CAP_DAILY_SHOP_PRODUCT_NAME})`);
     if (shopProductAggFull.length > CAP_SHOP_PRODUCT)
         overLimit.push(`Cửa hàng×Sản phẩm (${shopProductAggFull.length} tổ hợp, tối đa ${CAP_SHOP_PRODUCT})`);
     if (shopCategoryAggFull.length > CAP_SHOP_CATEGORY)
@@ -717,6 +767,7 @@ async function parseFile(file) {
         employeeProductAgg: Object.values(byEmployeeProduct).sort((a, b) => b.qty - a.qty).slice(0, 3000),
         dailyProductAgg: dailyProductAggFull,
         dailyProductNameAgg: dailyProductNameAggFull,
+        dailyShopProductNameAgg: dailyShopProductNameAggFull,
         dailyCustomerProductAgg,
         dailyShopProductAgg: dailyShopProductAggFull,
         shopProductAgg: shopProductAggFull,
@@ -1208,6 +1259,20 @@ async function savePromoPlan(label, items, periodDate) {
 }
 async function deletePromoPlan(id) {
     await db.collection("promoPlans").doc(id).delete();
+}
+function subscribePromoSkuLists(cb) {
+    return db.collection("promoSkuLists").orderBy("periodDate", "asc").onSnapshot((snap) => {
+        cb(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+}
+async function savePromoSkuList(label, items, periodDate) {
+    await db.collection("promoSkuLists").add({
+        label, periodDate: periodDate || todayISO(), items,
+        uploadedAtTs: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+}
+async function deletePromoSkuList(id) {
+    await db.collection("promoSkuLists").doc(id).delete();
 }
 function subscribeCustomers(cb) {
     return db.collection("customerSnapshots").orderBy("periodDate", "asc").onSnapshot(async (snap) => {
@@ -4482,7 +4547,7 @@ function collapseWhitespace(s) {
 }
 function PromoAutoView({ shopConfig }) {
     const [periods, setPeriods] = useState([]);
-    useEffect(() => { const u = subscribePeriods(setPeriods, ["dailyProductNameAgg", "shopAgg"]); return () => u(); }, []);
+    useEffect(() => { const u = subscribePeriods(setPeriods, ["dailyProductNameAgg", "dailyShopProductNameAgg", "dailyProductAgg", "dailyShopProductAgg", "shopAgg"]); return () => u(); }, []);
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
     const [shopFilter, setShopFilter] = useState("__ALL__");
@@ -4543,6 +4608,52 @@ function PromoAutoView({ shopConfig }) {
     const totalQty = groups.reduce((s, g) => s + g.qty, 0);
     const totalRevenue = groups.reduce((s, g) => s + g.revenue, 0);
     const ready = groups.length > 0;
+    // ---- Báo cáo theo từng Cửa hàng x Tên chương trình (dùng dữ liệu đã tách theo shop, chính xác hơn rawRows/groups tổng hợp) ----
+    const rawRowsByShop = useMemo(() => {
+        const rows = [];
+        for (const p of periods) {
+            if (!p.dailyShopProductNameAgg) continue;
+            for (const r of p.dailyShopProductNameAgg) {
+                if (shopFilter !== "__ALL__" && r.shop !== shopFilter) continue;
+                if (fromDate && r.date < fromDate) continue;
+                if (toDate && r.date > toDate) continue;
+                rows.push(r);
+            }
+        }
+        return rows;
+    }, [periods, shopFilter, fromDate, toDate]);
+    const groupsByShop = useMemo(() => {
+        const acc = {};
+        for (const r of rawRowsByShop) {
+            const nameKey = collapseWhitespace(r.productName).toLowerCase();
+            if (!nameKey) continue;
+            const key = `${r.shop}__${nameKey}`;
+            if (!acc[key]) acc[key] = { shop: r.shop, nameVariants: {}, qty: 0, revenue: 0, transactions: 0 };
+            const g = acc[key];
+            g.nameVariants[r.productName] = (g.nameVariants[r.productName] || 0) + r.qty + r.revenue + 1;
+            g.qty += r.qty;
+            g.revenue += r.revenue;
+            g.transactions += r.transactions || 0;
+        }
+        return Object.values(acc).map((g) => ({
+            shop: g.shop,
+            name: Object.entries(g.nameVariants).sort((a, b) => b[1] - a[1])[0][0],
+            qty: g.qty, revenue: g.revenue, transactions: g.transactions,
+        })).sort((a, b) => a.shop.localeCompare(b.shop) || (b.qty - a.qty));
+    }, [rawRowsByShop]);
+    // Chi phí giảm giá trực tiếp ước tính theo từng Cửa hàng x Chương trình (từ các dòng doanh thu âm, giống costBreakdown nhưng tách theo shop)
+    const costByShopProgram = useMemo(() => {
+        const acc = {};
+        for (const r of rawRowsByShop) {
+            const nameKey = collapseWhitespace(r.productName).toLowerCase();
+            if (!nameKey) continue;
+            const key = `${r.shop}__${nameKey}`;
+            if (!acc[key]) acc[key] = { discountCost: 0, giftQty: 0 };
+            if (r.revenue < 0) acc[key].discountCost += Math.abs(r.revenue);
+            else if (r.revenue === 0) acc[key].giftQty += r.qty || 0;
+        }
+        return acc;
+    }, [rawRowsByShop]);
     // Chi phí khuyến mại: giảm giá trực tiếp (doanh thu âm) tính ra tiền; tặng quà (doanh thu = 0) chỉ đếm số lượng vì chưa có dữ liệu giá tham chiếu
     const costBreakdown = useMemo(() => {
         let discountCost = 0, giftQty = 0, giftTransactions = 0;
@@ -4556,6 +4667,118 @@ function PromoAutoView({ shopConfig }) {
         }
         return { discountCost, giftQty, giftTransactions };
     }, [rawRows]);
+    // ---- Danh sách mã sản phẩm giảm giá trực tiếp/combo: Mã SP + Giá gốc + Giá sau giảm + Tên CTKM ----
+    const [skuLists, setSkuLists] = useState([]);
+    const [skuUploading, setSkuUploading] = useState(false);
+    const [skuError, setSkuError] = useState(null);
+    useEffect(() => {
+        const u = subscribePromoSkuLists(setSkuLists);
+        return () => u();
+    }, []);
+    async function handleSkuFile(file, label, periodDate) {
+        setSkuError(null);
+        setSkuUploading(true);
+        try {
+            const items = await parsePromoSkuFile(file);
+            await savePromoSkuList(label || file.name, items, periodDate);
+        }
+        catch (e) {
+            setSkuError(e.message || "Không đọc được file.");
+            throw e;
+        }
+        finally {
+            setSkuUploading(false);
+        }
+    }
+    // Gộp số lượng bán ra theo Mã sản phẩm trong khoảng ngày đang lọc (không phân biệt cửa hàng, vì dailyProductAgg không có cột Cửa hàng)
+    const qtyByProductCode = useMemo(() => {
+        const map = {};
+        for (const p of periods) {
+            if (!p.dailyProductAgg)
+                continue;
+            for (const r of p.dailyProductAgg) {
+                if (fromDate && r.date < fromDate)
+                    continue;
+                if (toDate && r.date > toDate)
+                    continue;
+                map[r.productCode] = (map[r.productCode] || 0) + (r.qty || 0);
+            }
+        }
+        return map;
+    }, [periods, fromDate, toDate]);
+    // Đối chiếu danh sách mã SP với số lượng bán thực tế, tính chi phí giảm giá chính xác theo giá gốc - giá sau giảm, gộp theo Tên CTKM
+    const skuCostByCtkm = useMemo(() => {
+        const allItems = [];
+        for (const list of skuLists)
+            for (const it of (list.items || []))
+                allItems.push(it);
+        const acc = {};
+        for (const it of allItems) {
+            const qty = qtyByProductCode[it.code] || 0;
+            const unitDiscount = Math.max(0, (it.originalPrice || 0) - (it.discountPrice || 0));
+            const cost = qty * unitDiscount;
+            const key = it.ctkmName || "Giảm giá trực tiếp theo mã SP";
+            if (!acc[key])
+                acc[key] = { name: key, skuCount: 0, qty: 0, cost: 0 };
+            acc[key].skuCount += 1;
+            acc[key].qty += qty;
+            acc[key].cost += cost;
+        }
+        return Object.values(acc).sort((a, b) => b.cost - a.cost);
+    }, [skuLists, qtyByProductCode]);
+    const skuTotalCost = skuCostByCtkm.reduce((s, g) => s + g.cost, 0);
+    // Chi phí theo danh sách mã SP (giá gốc/giá sau giảm) tách theo từng Cửa hàng, dùng dailyShopProductAgg
+    const qtyByShopProductCode = useMemo(() => {
+        const map = {};
+        for (const p of periods) {
+            if (!p.dailyShopProductAgg) continue;
+            for (const r of p.dailyShopProductAgg) {
+                if (shopFilter !== "__ALL__" && r.shop !== shopFilter) continue;
+                if (fromDate && r.date < fromDate) continue;
+                if (toDate && r.date > toDate) continue;
+                const key = `${r.shop}__${r.productCode}`;
+                map[key] = (map[key] || 0) + (r.qty || 0);
+            }
+        }
+        return map;
+    }, [periods, shopFilter, fromDate, toDate]);
+    const skuShopBreakdown = useMemo(() => {
+        const allShops = new Set();
+        for (const p of periods) for (const r of (p.shopAgg || [])) allShops.add(r.shop);
+        const allItems = [];
+        for (const list of skuLists) for (const it of (list.items || [])) allItems.push(it);
+        const rows = [];
+        for (const shop of allShops) {
+            const acc = {};
+            for (const it of allItems) {
+                const qty = qtyByShopProductCode[`${shop}__${it.code}`] || 0;
+                if (!qty) continue;
+                const unitDiscount = Math.max(0, (it.originalPrice || 0) - (it.discountPrice || 0));
+                const key = it.ctkmName || "Giảm giá trực tiếp theo mã SP";
+                if (!acc[key]) acc[key] = { shop, name: key, qty: 0, cost: 0 };
+                acc[key].qty += qty;
+                acc[key].cost += qty * unitDiscount;
+            }
+            rows.push(...Object.values(acc));
+        }
+        return rows.sort((a, b) => a.shop.localeCompare(b.shop) || (b.cost - a.cost));
+    }, [periods, skuLists, qtyByShopProductCode]);
+    // ---- Gộp báo cáo cuối cùng: Cửa hàng x Tên chương trình -> Doanh thu, Chi phí, SL sử dụng ----
+    const shopProgramReport = useMemo(() => {
+        const acc = {};
+        for (const g of groupsByShop) {
+            const key = `${g.shop}__${g.name}`;
+            const cost = (costByShopProgram[`${g.shop}__${collapseWhitespace(g.name).toLowerCase()}`] || {}).discountCost || 0;
+            acc[key] = { shop: g.shop, name: g.name, qty: g.qty, revenue: g.revenue, cost };
+        }
+        for (const r of skuShopBreakdown) {
+            const key = `${r.shop}__${r.name}`;
+            if (!acc[key]) acc[key] = { shop: r.shop, name: r.name, qty: 0, revenue: 0, cost: 0 };
+            acc[key].qty += r.qty;
+            acc[key].cost += r.cost;
+        }
+        return Object.values(acc).sort((a, b) => a.shop.localeCompare(b.shop) || (b.cost - a.cost) || (b.revenue - a.revenue));
+    }, [groupsByShop, costByShopProgram, skuShopBreakdown]);
     // ---- Kế hoạch khuyến mại tháng: tải lên rồi đối chiếu với dữ liệu thực tế đã phát hiện ----
     const [promoPlans, setPromoPlans] = useState([]);
     const [planUploading, setPlanUploading] = useState(false);
@@ -4658,6 +4881,56 @@ function PromoAutoView({ shopConfig }) {
         React.createElement(ManageFilesCard, { title: "kế hoạch khuyến mại đã tải", items: promoPlans, onDelete: deletePromoPlan }),
     ]);
 
+    const skuCard = React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20 } }, [
+        React.createElement("div", { key: "t", style: titleStyle }, "Danh sách mã sản phẩm giảm giá trực tiếp / combo"),
+        React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Tải file Excel gồm \"Mã sản phẩm\", \"Giá gốc\", \"Giá sau giảm\", và \"Tên CTKM\" (tuỳ chọn — để trống sẽ gộp chung vào nhóm \"Giảm giá trực tiếp theo mã SP\"). App sẽ đối chiếu với số lượng bán ra thực tế của từng mã (trong khoảng thời gian đang lọc ở trên) để tính chính xác số tiền đã giảm, thay vì chỉ ước tính từ dòng doanh thu âm."),
+        React.createElement(UploadStager, { onConfirm: (file, label, periodDate) => handleSkuFile(file, label, periodDate), buttonLabel: skuUploading ? "Đang xử lý..." : "Tải danh sách mã SP lên", dropzoneTitle: "Kéo thả file danh sách mã SP vào đây", dropzoneHint: 'File cần có cột "Mã sản phẩm", "Giá gốc", "Giá sau giảm".', showDropzone: false, showLabelInput: true }),
+        skuError && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginTop: 12 } }, skuError),
+        React.createElement(ManageFilesCard, { title: "danh sách mã SP đã tải", items: skuLists, onDelete: deletePromoSkuList }),
+        skuCostByCtkm.length > 0 && React.createElement("div", { key: "result", style: { marginTop: 16, borderTop: `1px solid ${COLORS.line}`, paddingTop: 16 } }, [
+            React.createElement("div", { key: "sum", style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 } }, [
+                React.createElement(KpiCard, { key: "total", label: "Tổng chi phí giảm giá (theo giá gốc/giá sau giảm)", value: fmtVND(skuTotalCost), tone: "clay" }),
+                React.createElement(KpiCard, { key: "cnt", label: "Số chương trình có mã SP khớp", value: fmtNum(skuCostByCtkm.length) }),
+            ]),
+            React.createElement("table", { key: "tbl", style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } }, [
+                React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase" } }, [
+                    React.createElement("th", { key: "n", style: { padding: "6px 8px" } }, "Tên CTKM"),
+                    React.createElement("th", { key: "s", style: { padding: "6px 8px", textAlign: "right" } }, "Số mã SP"),
+                    React.createElement("th", { key: "q", style: { padding: "6px 8px", textAlign: "right" } }, "SL bán ra"),
+                    React.createElement("th", { key: "c", style: { padding: "6px 8px", textAlign: "right" } }, "Chi phí giảm giá"),
+                ])),
+                React.createElement("tbody", { key: "b" }, skuCostByCtkm.map((g, i) => React.createElement("tr", { key: i, style: { borderTop: `1px solid ${COLORS.line}` } }, [
+                    React.createElement("td", { key: "n", style: { padding: "9px 8px" } }, g.name),
+                    React.createElement("td", { key: "s", style: { padding: "9px 8px", textAlign: "right" } }, fmtNum(g.skuCount)),
+                    React.createElement("td", { key: "q", style: { padding: "9px 8px", textAlign: "right" } }, fmtNum(g.qty)),
+                    React.createElement("td", { key: "c", style: { padding: "9px 8px", textAlign: "right", fontWeight: 600, color: COLORS.clay } }, fmtVND(g.cost)),
+                ]))),
+            ]),
+        ]),
+    ]);
+
+    const reportByShopCard = shopProgramReport.length > 0 ? React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 20 } }, [
+        React.createElement("div", { key: "t", style: titleStyle }, `Báo cáo đánh giá theo Cửa hàng × Chương trình (${shopProgramReport.length} dòng)`),
+        React.createElement("div", { key: "d", style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 10 } }, "Gộp từ cả 2 nguồn: dò theo tên sản phẩm (doanh thu, SL) và danh sách mã SP giảm giá (chi phí chính xác theo giá gốc/giá sau giảm nếu có tải lên). Không phụ thuộc bộ lọc Cửa hàng ở trên — luôn hiển thị đủ tất cả cửa hàng."),
+        React.createElement("div", { key: "wrap", style: { maxHeight: 480, overflowY: "auto", border: `1px solid ${COLORS.line}`, borderRadius: 10 } },
+            React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } }, [
+                React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase", position: "sticky", top: 0, background: COLORS.card } }, [
+                    React.createElement("th", { key: "s", style: { padding: "8px" } }, "Cửa hàng"),
+                    React.createElement("th", { key: "n", style: { padding: "8px" } }, "Tên chương trình"),
+                    React.createElement("th", { key: "q", style: { padding: "8px", textAlign: "right" } }, "SL sử dụng"),
+                    React.createElement("th", { key: "r", style: { padding: "8px", textAlign: "right" } }, "Doanh thu ghi nhận"),
+                    React.createElement("th", { key: "c", style: { padding: "8px", textAlign: "right" } }, "Chi phí"),
+                ])),
+                React.createElement("tbody", { key: "b" }, shopProgramReport.map((r, i) => React.createElement("tr", { key: i, style: { borderTop: `1px solid ${COLORS.line}` } }, [
+                    React.createElement("td", { key: "s", style: { padding: "8px", fontWeight: 600 } }, r.shop),
+                    React.createElement("td", { key: "n", style: { padding: "8px", maxWidth: 320 } }, r.name),
+                    React.createElement("td", { key: "q", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.qty)),
+                    React.createElement("td", { key: "r", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.revenue)),
+                    React.createElement("td", { key: "c", style: { padding: "8px", textAlign: "right", color: r.cost > 0 ? COLORS.clay : COLORS.inkSoft, fontWeight: r.cost > 0 ? 600 : 400 } }, r.cost > 0 ? fmtVND(r.cost) : "—"),
+                ]))),
+            ])),
+    ]) : null;
+
     let resultBlock;
     if (filesWithProductName === 0) {
         resultBlock = React.createElement("div", { style: { ...cardStyle, textAlign: "center", color: COLORS.inkSoft } }, "Chưa file doanh thu nào nhận diện được cột \"Tên sản phẩm\". Kiểm tra lại tên cột trong file, hoặc gửi tên cột thật để mình khớp cho đúng.");
@@ -4748,6 +5021,8 @@ function PromoAutoView({ shopConfig }) {
     return React.createElement(React.Fragment, null, [
         React.createElement(React.Fragment, { key: "filter" }, filterCard),
         React.createElement(React.Fragment, { key: "plan" }, planCard),
+        React.createElement(React.Fragment, { key: "sku" }, skuCard),
+        reportByShopCard && React.createElement(React.Fragment, { key: "byshop" }, reportByShopCard),
         React.createElement(React.Fragment, { key: "result" }, resultBlock),
         comparisonBlock && React.createElement(React.Fragment, { key: "compare" }, comparisonBlock),
     ]);
