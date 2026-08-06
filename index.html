@@ -950,9 +950,36 @@ function exportChronicAlertsToExcel(rows, statusBadgeFn) {
     XLSX.writeFile(wb, `theo-doi-thuoc-man-tinh-${todayISO()}.xlsx`);
 }
 // ---------- Firestore data layer ----------
+// Cache các trường tổng hợp (Agg) đã tải theo periodId, tránh tải lại nếu period không đổi
+const _periodAggCache = new Map();
+function _periodVersionKey(base) {
+    const ts = base.uploadedAtTs;
+    if (ts && typeof ts.toMillis === "function") return String(ts.toMillis());
+    return JSON.stringify({ rowCount: base.rowCount, label: base.label, periodDate: base.periodDate });
+}
 function subscribePeriods(cb) {
-    return db.collection("periods").orderBy("periodDate", "asc").onSnapshot((snap) => {
-        cb(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    return db.collection("periods").orderBy("periodDate", "asc").onSnapshot(async (snap) => {
+        const periods = await Promise.all(snap.docs.map(async (d) => {
+            const base = { id: d.id, ...d.data() };
+            const versionKey = _periodVersionKey(base);
+            const cached = _periodAggCache.get(d.id);
+            if (cached && cached.versionKey === versionKey) {
+                return { ...base, ...cached.aggregates };
+            }
+            let aggregates = {};
+            try {
+                const aggSnap = await db.collection("periods").doc(d.id).collection("aggregates").get();
+                aggSnap.forEach((aggDoc) => {
+                    const val = aggDoc.data();
+                    aggregates[aggDoc.id] = val && "data" in val ? val.data : val;
+                });
+            } catch (e) {
+                console.error("Loi tai aggregates cho period", d.id, e);
+            }
+            _periodAggCache.set(d.id, { versionKey, aggregates });
+            return { ...base, ...aggregates };
+        }));
+        cb(periods);
     });
 }
 async function savePeriod(label, parsed, periodDate) {
