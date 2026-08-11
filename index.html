@@ -1372,7 +1372,7 @@ function InventoryView({ shopConfig }) {
     const filteredShops = useMemo(() => {
         if (!current)
             return [];
-        let rows = current.shopAgg.map((s) => ({ ...s, segment: shopConfig[s.shop] || "Chưa phân loại" }));
+        let rows = (current.shopAgg||[]).map((s) => ({ ...s, segment: shopConfig[s.shop] || "Chưa phân loại" }));
         if (segmentFilter !== "Tất cả")
             rows = rows.filter((r) => r.segment === segmentFilter);
         return rows;
@@ -1381,7 +1381,7 @@ function InventoryView({ shopConfig }) {
     const filteredAlerts = useMemo(() => {
         if (!current)
             return [];
-        let rows = current.alerts.filter((a) => a.daysToExpiry <= expiryWindow);
+        let rows = (current.alerts||[]).filter((a) => a.daysToExpiry <= expiryWindow);
         if (segmentFilter !== "Tất cả")
             rows = rows.filter((a) => (shopConfig[a.shop] || "Chưa phân loại") === segmentFilter);
         if (searchQuery.trim()) {
@@ -1490,7 +1490,7 @@ function InventoryView({ shopConfig }) {
                 React.createElement("div", { style: { ...cardStyle, background: COLORS.card } },
                     React.createElement("div", { style: titleStyle },
                         "Top s\u1EA3n ph\u1EA9m t\u1ED3n kho theo gi\u00E1 tr\u1ECB (top 20 trong t\u1ED5ng ",
-                        current.topProducts.length,
+                        (current.topProducts||[]).length,
                         "+ m\u00E3)"),
                     React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
                         React.createElement("thead", null,
@@ -1501,7 +1501,7 @@ function InventoryView({ shopConfig }) {
                                 React.createElement("th", { style: { padding: "6px 8px", textAlign: "right" } }, "SL t\u1ED3n"),
                                 React.createElement("th", { style: { padding: "6px 8px", textAlign: "right" } }, "Gi\u00E1 tr\u1ECB"),
                                 React.createElement("th", { style: { padding: "6px 8px", textAlign: "right" } }, "S\u1ED1 c\u1EEDa h\u00E0ng"))),
-                        React.createElement("tbody", null, current.topProducts.slice(0, 20).map((p) => {
+                        React.createElement("tbody", null, (current.topProducts||[]).slice(0, 20).map((p) => {
                             var _a;
                             return (React.createElement("tr", { key: p.code, style: { borderTop: `1px solid ${COLORS.line}` } },
                                 React.createElement("td", { style: { padding: "9px 8px", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 } }, p.code),
@@ -1619,7 +1619,7 @@ function RevenueView({ shopConfig }) {
     const filteredShops = useMemo(() => {
         if (!current)
             return [];
-        let rows = current.shopAgg.map((s) => ({ ...s, segment: shopConfig[s.shop] || "Chưa phân loại" }));
+        let rows = (current.shopAgg||[]).map((s) => ({ ...s, segment: shopConfig[s.shop] || "Chưa phân loại" }));
         if (segmentFilter !== "Tất cả")
             rows = rows.filter((r) => r.segment === segmentFilter);
         return rows;
@@ -2219,7 +2219,7 @@ function RevenueView({ shopConfig }) {
                         React.createElement("div", { style: titleStyle }, "Doanh thu theo ph\u00E2n kh\u00FAc"),
                         React.createElement(DoughnutSegments, { data: kpiSegmentAgg }),
                         React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 } }, kpiSegmentAgg.map((s) => React.createElement(LabelTag, { key: s.segment, tone: s.segment }, s.segment))))),
-                !isRangeMode && current.meta.hasDate && current.timeseries.length > 1 && (React.createElement("div", { style: { display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 } },
+                !isRangeMode && current.meta.hasDate && (current.timeseries||[]).length > 1 && (React.createElement("div", { style: { display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 } },
                     React.createElement("div", { style: { flex: "1 1 260px", background: COLORS.card, border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: 18 } },
                         React.createElement("div", { style: titleStyle }, "S\u1ED1 l\u01B0\u1EE3ng bill theo ng\u00E0y"),
                         !current.meta.hasBillId && React.createElement("div", { style: { fontSize: 11, color: COLORS.inkSoft, marginBottom: 6 } }, "\u01AF\u1EDBc t\u00EDnh = s\u1ED1 d\u00F2ng d\u1EEF li\u1EC7u/ng\u00E0y (file kh\u00F4ng c\u00F3 c\u1ED9t s\u1ED1 h\u00F3a \u0111\u01A1n)"),
@@ -3515,7 +3515,7 @@ function CustomerView({ shopConfig }) {
     const filteredShops = useMemo(() => {
         if (!current)
             return [];
-        let rows = current.shopAgg.map((s) => ({ ...s, segment: shopConfig[s.shop] || "Chưa phân loại" }));
+        let rows = (current.shopAgg||[]).map((s) => ({ ...s, segment: shopConfig[s.shop] || "Chưa phân loại" }));
         if (segmentFilter !== "Tất cả")
             rows = rows.filter((r) => r.segment === segmentFilter);
         return rows;
@@ -3537,7 +3537,7 @@ function CustomerView({ shopConfig }) {
     const totalValue = filteredShops.reduce((a, s) => a + s.totalValue, 0);
     const totalCustomers = filteredShops.reduce((a, s) => a + s.customerCount, 0);
     const totalCard = filteredShops.reduce((a, s) => a + s.cardCount, 0);
-    const tierOptions = current ? current.tierAgg.map((t) => t.tier) : [];
+    const tierOptions = current ? (current.tierAgg||[]).map((t) => t.tier) : [];
     return (React.createElement(React.Fragment, null,
         React.createElement("div", { style: { display: "flex", gap: 4, marginBottom: 14 } }, [{ id: "list", label: "Khách hàng" }, { id: "fraud", label: "Cảnh báo gian lận" }, { id: "chronic", label: "Thuốc mạn tính" }].map((t) => (React.createElement("button", { key: t.id, onClick: () => setSubTab(t.id), style: {
                 padding: "7px 14px", borderRadius: 20, border: `1px solid ${subTab === t.id ? COLORS.pine : COLORS.line}`,
@@ -3574,7 +3574,7 @@ function CustomerView({ shopConfig }) {
                     React.createElement("div", { style: { flex: "1 1 260px", ...cardStyle, background: COLORS.card } },
                         React.createElement("div", { style: titleStyle }, "Gi\u00E1 tr\u1ECB mua theo h\u1EA1ng th\u00E0nh vi\u00EAn"),
                         React.createElement(DoughnutGeneric, { data: current.tierAgg, labelKey: "tier", valueKey: "totalValue", colorMap: TIER_COLOR, ariaLabel: "Bi\u1EC3u \u0111\u1ED3 theo h\u1EA1ng th\u00E0nh vi\u00EAn" }),
-                        React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 } }, current.tierAgg.map((t) => (React.createElement("span", { key: t.tier, style: { display: "inline-block", padding: "3px 10px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600,
+                        React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 } }, (current.tierAgg||[]).map((t) => (React.createElement("span", { key: t.tier, style: { display: "inline-block", padding: "3px 10px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600,
                                 color: (TIER_COLOR[t.tier] || TIER_COLOR["Chưa xếp hạng"]).fg, background: (TIER_COLOR[t.tier] || TIER_COLOR["Chưa xếp hạng"]).bg, borderRadius: "3px 3px 6px 6px" } },
                             t.tier,
                             " (",
