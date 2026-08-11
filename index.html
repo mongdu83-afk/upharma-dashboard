@@ -2078,7 +2078,7 @@ function RevenueView({ shopConfig }) {
                         { label: "7 ngày qua", get: () => { const t = new Date(); const f = new Date(); f.setDate(t.getDate() - 6); return [f.toISOString().slice(0, 10), todayISO()]; } },
                         { label: "30 ngày qua", get: () => { const t = new Date(); const f = new Date(); f.setDate(t.getDate() - 29); return [f.toISOString().slice(0, 10), todayISO()]; } },
                         { label: "Tháng này", get: () => { const t = new Date(); const f = new Date(t.getFullYear(), t.getMonth(), 1); return [f.toISOString().slice(0, 10), todayISO()]; } },
-                        { label: "Tất cả", get: () => ["", ""] },
+                        { label: "Tất cả", get: () => [rangeMinDate || "", rangeMaxDate || ""] },
                     ].map((p) => (React.createElement("button", { key: p.label, type: "button", onClick: () => { const [f, t] = p.get(); setRangeFrom(f); setRangeTo(t); }, style: { padding: "6px 10px", background: "transparent", border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 12, color: COLORS.inkSoft } }, p.label))),
                     React.createElement("span", { style: { fontSize: 12, color: COLORS.inkSoft } }, "T\u00EDnh tr\u00EAn to\u00E0n b\u1ED9 d\u1EEF li\u1EC7u doanh thu \u0111\u00E3 c\u00F3, g\u1ED9p theo Ng\u00E0y v\u00E0o s\u1ED5 \u2014 kh\u00F4ng ph\u1EE5 thu\u1ED9c file n\u00E0o \u0111\u01B0\u1EE3c t\u1EA3i l\u00EAn khi n\u00E0o."))),
                 React.createElement("select", { value: segmentFilter, onChange: (e) => setSegmentFilter(e.target.value), style: selectStyle },
