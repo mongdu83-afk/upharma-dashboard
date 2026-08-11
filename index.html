@@ -628,7 +628,7 @@ async function parseFile(file) {
     if (overLimit.length) {
         throw new Error(`File có quá nhiều tổ hợp dữ liệu chi tiết, vượt giới hạn an toàn để lưu trữ: ${overLimit.join("; ")}. Hãy tách file thành khoảng thời gian ngắn hơn (vd theo tuần thay vì theo tháng, hoặc theo từng cửa hàng) rồi tải lại từng phần.`);
     }
-    return {
+    const result = {
         meta: {
             fileName: file.name, uploadedAt: new Date().toISOString(), rowCount,
             hasDate: Object.keys(byDate).length > 0, hasCategory: Object.keys(byCategory).length > 0,
@@ -671,6 +671,7 @@ async function parseFile(file) {
         shopCategoryAgg: shopCategoryAggFull,
         dailyShopCategoryAgg: dailyShopCategoryAggFull,
     };
+    return result;
 }
 // ---------- inventory parsing ----------
 const INVENTORY_EXACT = {
@@ -950,9 +951,47 @@ function exportChronicAlertsToExcel(rows, statusBadgeFn) {
     XLSX.writeFile(wb, `theo-doi-thuoc-man-tinh-${todayISO()}.xlsx`);
 }
 // ---------- Firestore data layer ----------
+// Các trường dữ liệu chi tiết (Ngày×..., ...×sản phẩm) thường rất lớn — tách riêng khỏi tài liệu chính
+// của kỳ (period) sang 1 subcollection "parts", mỗi phần luôn dưới giới hạn 1MB/tài liệu của Firestore.
+// Khi đọc, tự động ghép lại thành đúng các trường như cũ — phần còn lại của app không cần biết gì về việc tách này.
+const PERIOD_LARGE_FIELDS = [
+    "productAgg", "dailyShopAgg", "customerProductAgg", "dailyEmployeeAgg", "customerAgg",
+    "employeeProductAgg", "dailyProductAgg", "dailyProductNameAgg", "dailyCustomerProductAgg",
+    "dailyShopProductAgg", "shopProductAgg", "shopCategoryAgg", "dailyShopCategoryAgg",
+];
+function chunkArrayBySize(arr, maxBytes) {
+    const chunks = [];
+    let cur = [], curSize = 2;
+    for (const item of arr) {
+        const itemSize = JSON.stringify(item).length + 1;
+        if (cur.length && curSize + itemSize > maxBytes) {
+            chunks.push(cur);
+            cur = []; curSize = 2;
+        }
+        cur.push(item);
+        curSize += itemSize;
+    }
+    if (cur.length) chunks.push(cur);
+    return chunks;
+}
 function subscribePeriods(cb) {
-    return db.collection("periods").orderBy("periodDate", "asc").onSnapshot((snap) => {
-        cb(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    return db.collection("periods").orderBy("periodDate", "asc").onSnapshot(async (snap) => {
+        const periods = await Promise.all(snap.docs.map(async (d) => {
+            const base = { id: d.id, ...d.data() };
+            try {
+                const partsSnap = await d.ref.collection("parts").get();
+                const grouped = {};
+                partsSnap.docs.forEach((p) => {
+                    const pd = p.data();
+                    if (!grouped[pd.field]) grouped[pd.field] = [];
+                    grouped[pd.field][pd.chunkIndex] = pd.data || [];
+                });
+                for (const field of Object.keys(grouped))
+                    base[field] = grouped[field].flat();
+            } catch (e) { console.error("Lỗi đọc parts của kỳ", d.id, e); }
+            return base;
+        }));
+        cb(periods);
     });
 }
 function subscribeWeeklyPlan(weekId, cb) {
@@ -962,12 +1001,30 @@ async function saveWeeklyPlan(weekId, data) {
     await db.collection("weeklyPlans").doc(weekId).set(data, { merge: true });
 }
 async function savePeriod(label, parsed, periodDate) {
-    await db.collection("periods").add({
-        label, periodDate: periodDate || todayISO(), ...parsed, uploadedAtTs: firebase.firestore.FieldValue.serverTimestamp(),
-    });
+    const core = { label, periodDate: periodDate || todayISO(), uploadedAtTs: firebase.firestore.FieldValue.serverTimestamp() };
+    for (const key of Object.keys(parsed)) {
+        if (!PERIOD_LARGE_FIELDS.includes(key)) core[key] = parsed[key];
+    }
+    const periodRef = await db.collection("periods").add(core);
+    const writes = [];
+    for (const field of PERIOD_LARGE_FIELDS) {
+        const arr = parsed[field] || [];
+        if (!arr.length) continue;
+        const chunks = chunkArrayBySize(arr, 700000); // chừa đệm an toàn dưới 1,048,576 bytes
+        chunks.forEach((chunk, i) => {
+            writes.push(periodRef.collection("parts").doc(`${field}_${i}`).set({ field, chunkIndex: i, chunkCount: chunks.length, data: chunk }));
+        });
+    }
+    await Promise.all(writes);
+    return periodRef;
 }
 async function deletePeriod(id) {
-    await db.collection("periods").doc(id).delete();
+    const ref = db.collection("periods").doc(id);
+    const partsSnap = await ref.collection("parts").get();
+    const batch = db.batch();
+    partsSnap.docs.forEach((d) => batch.delete(d.ref));
+    batch.delete(ref);
+    await batch.commit();
 }
 function subscribeShopConfig(cb) {
     return db.collection("config").doc("shopSegments").onSnapshot((doc) => cb(doc.exists ? doc.data() : {}));
