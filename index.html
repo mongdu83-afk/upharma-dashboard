@@ -2102,7 +2102,13 @@ function RevenueView({ shopConfig }) {
                         React.createElement("td", { style: { padding: "8px 10px", textAlign: "right" } }, fmtNum((p.meta && p.meta.rowCount) || 0)),
                         React.createElement("td", { style: { padding: "8px 10px", textAlign: "right" } },
                             React.createElement("button", { type: "button", onClick: () => handleDeletePeriod(p.id), disabled: deletingId === p.id, style: { padding: "4px 10px", background: "transparent", color: COLORS.clay, border: `1px solid ${COLORS.clay}`, borderRadius: 6, fontSize: 12 } }, deletingId === p.id ? "\u0110ang xo\u00E1..." : "Xo\u00E1")))))))),
-            isRangeMode && !kpiHasData && (React.createElement("div", { style: { ...cardStyle, background: COLORS.card, color: COLORS.inkSoft, fontSize: 13 } }, "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u theo ng\u00E0y trong kho\u1EA3ng \u0111\u00E3 ch\u1ECDn \u2014 c\u1EA7n file doanh thu c\u00F3 c\u1ED9t Ng\u00E0y.")),
+            isRangeMode && !kpiHasData && (React.createElement("div", { style: { ...cardStyle, background: COLORS.card, color: COLORS.inkSoft, fontSize: 13 } }, [
+                React.createElement("div", { key: "m" }, "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u theo ng\u00E0y trong kho\u1EA3ng \u0111\u00E3 ch\u1ECDn \u2014 c\u1EA7n file doanh thu c\u00F3 c\u1ED9t Ng\u00E0y."),
+                React.createElement("div", { key: "diag", style: { marginTop: 10, paddingTop: 10, borderTop: `1px solid ${COLORS.line}`, fontSize: 12 } }, [
+                    React.createElement("div", { key: "t", style: { fontWeight: 700, marginBottom: 6 } }, "Ch\u1EA9n \u0111o\u00E1n t\u1EEBng k\u1EF3 \u0111\u00E3 t\u1EA3i:"),
+                    ...periods.map((p) => { var _a, _b; return React.createElement("div", { key: p.id }, `${p.label || ((_a = p.meta) === null || _a === void 0 ? void 0 : _a.fileName) || "(kh\u00F4ng t\u00EAn)"} \u2014 ${((_b = p.meta) === null || _b === void 0 ? void 0 : _b.hasDate) ? "\u2705 c\u00F3 c\u1ED9t Ng\u00E0y" : "\u274C KH\u00D4NG c\u00F3 c\u1ED9t Ng\u00E0y"}, dailyShopAgg: ${p.dailyShopAgg ? p.dailyShopAgg.length + " d\u00F2ng" : "kh\u00F4ng c\u00F3"}`); }),
+                ]),
+            ])),
             kpiHasData && (React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 } },
                     React.createElement(KpiCard, { tone: "pine", label: "T\u1ED5ng doanh thu", value: fmtVND(kpiTotal), sub: `${kpiChartShops.length} cửa hàng` }),
