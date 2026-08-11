@@ -1628,7 +1628,7 @@ function RevenueView({ shopConfig }) {
         if (!current)
             return [];
         const acc = {};
-        for (const s of current.shopAgg) {
+        for (const s of (current.shopAgg || [])) {
             const seg = shopConfig[s.shop] || "Chưa phân loại";
             acc[seg] = (acc[seg] || 0) + s.revenue;
         }
@@ -1909,7 +1909,7 @@ function RevenueView({ shopConfig }) {
     const allDates = useMemo(() => periods.map((p) => p.periodDate).filter(Boolean).sort(), [periods]);
     const revenueTrend = useMemo(() => withChange(periods
         .filter((p) => (!fromDate || p.periodDate >= fromDate) && (!toDate || p.periodDate <= toDate))
-        .map((p) => ({ label: p.label, value: p.shopAgg.reduce((a, s) => a + s.revenue, 0), date: p.periodDate }))
+        .map((p) => ({ label: p.label, value: (p.shopAgg || []).reduce((a, s) => a + s.revenue, 0), date: p.periodDate }))
         .sort((a, b) => new Date(a.date) - new Date(b.date))), [periods, fromDate, toDate]);
     // Gộp dữ liệu theo TỪNG NGÀY từ tất cả các file đã tải lên (dùng cột Ngày bên trong mỗi file) — tự động phân tích, không cần tải nhiều file riêng lẻ
     const mergedDaily = useMemo(() => {
