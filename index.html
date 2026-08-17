@@ -997,6 +997,11 @@ function subscribePeriods(cb) {
 function subscribeWeeklyPlan(weekId, cb) {
     return db.collection("weeklyPlans").doc(weekId).onSnapshot((doc) => cb(doc.exists ? doc.data() : null));
 }
+function subscribeWeeklyPlansList(cb) {
+    return db.collection("weeklyPlans").orderBy(firebase.firestore.FieldPath.documentId(), "desc").onSnapshot((snap) => {
+        cb(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+}
 async function saveWeeklyPlan(weekId, data) {
     await db.collection("weeklyPlans").doc(weekId).set(data, { merge: true });
 }
@@ -4537,48 +4542,34 @@ function fmtDMY(iso) {
     const [y, m, d] = iso.split("-");
     return `${d}/${m}`;
 }
+function weekPlanHasContent(plan) {
+    if (!plan) return false;
+    return Object.values(plan).some((s) => s && (s.ghiChu || s.chiTieu || s.baoCao));
+}
 const WEEKPLAN_SECTIONS = [
-    { key: "nhanSu", label: "👥 Nhân sự", color: COLORS.pine, colorBg: COLORS.pineSoft },
-    { key: "hangHoa", label: "📦 Hàng hoá", color: COLORS.amber, colorBg: COLORS.amberSoft },
-    { key: "coSoVatChat", label: "🏬 Cơ sở vật chất", color: COLORS.clay, colorBg: COLORS.claySoft },
+    { key: "nhanSu", label: "👥 Nhân sự", color: COLORS.pine },
+    { key: "doanhThu", label: "💰 Doanh thu", color: COLORS.amber },
+    { key: "hangHoa", label: "📦 Hàng hoá", color: COLORS.amber },
+    { key: "coSoVatChat", label: "🏬 Cơ sở vật chất", color: COLORS.clay },
 ];
 function WeeklyPlanView({ shopConfig }) {
-    const [periods, setPeriods] = useState([]);
     const [weekStart, setWeekStart] = useState(mondayOf(todayISO()));
     const [plan, setPlan] = useState(null);
     const [prevPlan, setPrevPlan] = useState(null);
+    const [allPlans, setAllPlans] = useState([]);
     const [draft, setDraft] = useState({});
     const [saving, setSaving] = useState(false);
     const [savedAt, setSavedAt] = useState(null);
+    const [showHistory, setShowHistory] = useState(false);
+    const [jumpDate, setJumpDate] = useState("");
 
-    useEffect(() => { const u = subscribePeriods(setPeriods); return u; }, []);
     useEffect(() => { const u = subscribeWeeklyPlan(weekStart, setPlan); return u; }, [weekStart]);
     useEffect(() => { const u = subscribeWeeklyPlan(addDaysISO(weekStart, -7), setPrevPlan); return u; }, [weekStart]);
+    useEffect(() => { const u = subscribeWeeklyPlansList(setAllPlans); return u; }, []);
     useEffect(() => {
         setDraft(plan || {});
+        setSavedAt(null);
     }, [plan, weekStart]);
-
-    // Doanh thu tuần này / tuần trước — gộp timeseries từ mọi file đã tải, tự tính không cần nhập tay
-    const dateRevenueMap = useMemo(() => {
-        const map = {};
-        for (const p of periods) {
-            if (!p.timeseries) continue;
-            for (const d of p.timeseries) map[d.date] = (map[d.date] || 0) + d.revenue;
-        }
-        return map;
-    }, [periods]);
-    function sumWeek(mondayISO) {
-        let sum = 0, hasData = false;
-        for (let i = 0; i < 7; i++) {
-            const dt = addDaysISO(mondayISO, i);
-            if (dateRevenueMap[dt] != null) { sum += dateRevenueMap[dt]; hasData = true; }
-        }
-        return { sum, hasData };
-    }
-    const thisWeekRev = sumWeek(weekStart);
-    const prevWeekRev = sumWeek(addDaysISO(weekStart, -7));
-    const revChangePct = (thisWeekRev.hasData && prevWeekRev.hasData && prevWeekRev.sum > 0)
-        ? ((thisWeekRev.sum - prevWeekRev.sum) / prevWeekRev.sum) * 100 : null;
 
     function updateField(section, field, value) {
         setDraft((d) => ({ ...d, [section]: { ...(d[section] || {}), [field]: value } }));
@@ -4589,56 +4580,68 @@ function WeeklyPlanView({ shopConfig }) {
         setSaving(false);
         setSavedAt(new Date());
     }
+    function goToWeek(iso) {
+        setWeekStart(mondayOf(iso));
+        setShowHistory(false);
+    }
 
-    const weekNav = React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 18 } }, [
+    const weekNav = React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 } }, [
         React.createElement("button", { key: "prev", onClick: () => setWeekStart(addDaysISO(weekStart, -7)), style: { ...selectStyle, cursor: "pointer" } }, "← Tuần trước"),
         React.createElement("div", { key: "label", style: { fontFamily: "'Fraunces', serif", fontSize: 18, fontWeight: 700 } }, `Tuần ${weekLabel(weekStart)}`),
         React.createElement("button", { key: "next", onClick: () => setWeekStart(addDaysISO(weekStart, 7)), style: { ...selectStyle, cursor: "pointer" } }, "Tuần sau →"),
         React.createElement("button", { key: "today", onClick: () => setWeekStart(mondayOf(todayISO())), style: { ...selectStyle, cursor: "pointer", color: COLORS.inkSoft } }, "Về tuần này"),
+        React.createElement("span", { key: "sep", style: { color: COLORS.line } }, "|"),
+        React.createElement("input", { key: "jump", type: "date", value: jumpDate, onChange: (e) => { setJumpDate(e.target.value); if (e.target.value) goToWeek(e.target.value); }, style: selectStyle }),
+        React.createElement("button", { key: "history", onClick: () => setShowHistory(!showHistory), style: { ...selectStyle, cursor: "pointer", background: showHistory ? COLORS.pineSoft : "#fff", color: showHistory ? COLORS.pine : COLORS.ink } }, `🔎 Tìm lại tuần đã lưu (${allPlans.length})`),
     ]);
 
-    const revenueCard = React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 16, borderLeft: `4px solid ${COLORS.pine}` } }, [
-        React.createElement("div", { key: "t", style: { ...titleStyle, marginBottom: 12 } }, "💰 Doanh thu — tự động so sánh với tuần trước"),
-        React.createElement("div", { key: "kpis", style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 } }, [
-            React.createElement(KpiCard, { key: "a", label: "Doanh thu tuần này", value: thisWeekRev.hasData ? fmtVND(thisWeekRev.sum) : "Chưa có dữ liệu", tone: "amber" }),
-            React.createElement(KpiCard, { key: "b", label: "Doanh thu tuần trước", value: prevWeekRev.hasData ? fmtVND(prevWeekRev.sum) : "Chưa có dữ liệu" }),
-            React.createElement(KpiCard, { key: "c", label: "% thay đổi", value: revChangePct == null ? "—" : `${revChangePct >= 0 ? "+" : ""}${revChangePct.toFixed(1)}%`, tone: revChangePct != null && revChangePct >= 0 ? "pine" : undefined }),
-        ]),
-        React.createElement("div", { key: "note", className: "field" }, [
-            React.createElement("label", { key: "l", style: { fontSize: 12, fontWeight: 600, marginBottom: 5, display: "block" } }, "Ghi chú / kế hoạch doanh thu tuần này"),
-            React.createElement("textarea", { key: "i", rows: 3, value: ((draft.doanhThu || {}).ghiChu) || "", onChange: (e) => updateField("doanhThu", "ghiChu", e.target.value), style: { width: "100%", padding: "9px 10px", border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 13.5, fontFamily: "inherit" } }),
-        ]),
+    const historyPanel = showHistory && React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 16 } }, [
+        React.createElement("div", { key: "t", style: { ...titleStyle, marginBottom: 10 } }, "Các tuần đã có kế hoạch lưu"),
+        allPlans.length === 0
+            ? React.createElement("div", { key: "e", style: { fontSize: 13, color: COLORS.inkSoft } }, "Chưa có tuần nào được lưu.")
+            : React.createElement("div", { key: "list", style: { display: "flex", flexWrap: "wrap", gap: 8 } }, allPlans.map((p) =>
+                React.createElement("button", { key: p.id, onClick: () => goToWeek(p.id), style: {
+                    padding: "7px 12px", borderRadius: 8, border: `1px solid ${p.id === weekStart ? COLORS.pine : COLORS.line}`,
+                    background: p.id === weekStart ? COLORS.pineSoft : "#fff", color: p.id === weekStart ? COLORS.pine : COLORS.ink,
+                    fontSize: 12.5, cursor: "pointer",
+                } }, `Tuần ${weekLabel(p.id)}`)
+            )),
     ]);
 
+    function prevText(section, field) {
+        const v = ((prevPlan || {})[section] || {})[field];
+        return v ? v : "(không có ghi chú)";
+    }
     const sectionCards = WEEKPLAN_SECTIONS.map((s) => {
-        const prevData = (prevPlan || {})[s.key] || {};
         return React.createElement("div", { key: s.key, style: { ...cardStyle, background: COLORS.card, marginBottom: 16, borderLeft: `4px solid ${s.color}` } }, [
             React.createElement("div", { key: "t", style: { ...titleStyle, marginBottom: 12 } }, s.label),
             React.createElement("div", { key: "grid", style: { display: "flex", gap: 14, flexWrap: "wrap" } }, [
-                React.createElement("div", { key: "plan", className: "field", style: { flex: "1 1 260px" } }, [
-                    React.createElement("label", { key: "l", style: { fontSize: 12, fontWeight: 600, marginBottom: 5, display: "block" } }, "Kế hoạch tuần này"),
-                    React.createElement("textarea", { key: "i", rows: 4, value: ((draft[s.key] || {}).ghiChu) || "", onChange: (e) => updateField(s.key, "ghiChu", e.target.value), style: { width: "100%", padding: "9px 10px", border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 13.5, fontFamily: "inherit" } }),
+                ["ghiChu", "Kế hoạch tuần này"], ["chiTieu", "Chỉ tiêu / mục tiêu tuần này"],
+            ].map(([field, labelText]) => React.createElement("div", { key: field, style: { flex: "1 1 260px" } }, [
+                React.createElement("label", { key: "l", style: { fontSize: 12, fontWeight: 600, marginBottom: 5, display: "block" } }, labelText),
+                React.createElement("textarea", { key: "i", rows: 4, value: ((draft[s.key] || {})[field]) || "", onChange: (e) => updateField(s.key, field, e.target.value), style: { width: "100%", padding: "9px 10px", border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 13.5, fontFamily: "inherit", marginBottom: 8 } }),
+                React.createElement("div", { key: "prev", style: { fontSize: 11.5, color: COLORS.inkSoft, background: COLORS.paper, borderRadius: 7, padding: "7px 9px" } }, [
+                    React.createElement("b", { key: "b" }, "Tuần trước: "), prevText(s.key, field),
                 ]),
-                React.createElement("div", { key: "target", className: "field", style: { flex: "1 1 260px" } }, [
-                    React.createElement("label", { key: "l", style: { fontSize: 12, fontWeight: 600, marginBottom: 5, display: "block" } }, "Chỉ tiêu / mục tiêu tuần này"),
-                    React.createElement("textarea", { key: "i", rows: 4, value: ((draft[s.key] || {}).chiTieu) || "", onChange: (e) => updateField(s.key, "chiTieu", e.target.value), style: { width: "100%", padding: "9px 10px", border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 13.5, fontFamily: "inherit" } }),
-                ]),
-            ]),
-            (prevData.ghiChu || prevData.chiTieu) && React.createElement("div", { key: "prev", style: { marginTop: 10, paddingTop: 10, borderTop: `1px solid ${COLORS.line}`, fontSize: 12, color: COLORS.inkSoft } }, [
-                React.createElement("b", { key: "b" }, "Tuần trước: "),
-                prevData.ghiChu || "(không có ghi chú)",
-                prevData.chiTieu ? ` — Chỉ tiêu: ${prevData.chiTieu}` : "",
-            ]),
+            ]))),
         ]);
     });
 
+    const matBangCard = React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 16, borderLeft: `4px solid ${COLORS.pine}` } }, [
+        React.createElement("div", { key: "t", style: { ...titleStyle, marginBottom: 12 } }, "🏢 Mặt bằng"),
+        React.createElement("label", { key: "l", style: { fontSize: 12, fontWeight: 600, marginBottom: 5, display: "block" } }, "Báo cáo về mặt bằng tuần này"),
+        React.createElement("textarea", { key: "i", rows: 4, value: ((draft.matBang || {}).baoCao) || "", onChange: (e) => updateField("matBang", "baoCao", e.target.value), style: { width: "100%", padding: "9px 10px", border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 13.5, fontFamily: "inherit", marginBottom: 8 } }),
+        React.createElement("div", { key: "prev", style: { fontSize: 11.5, color: COLORS.inkSoft, background: COLORS.paper, borderRadius: 7, padding: "7px 9px" } }, [
+            React.createElement("b", { key: "b" }, "Tuần trước: "), prevText("matBang", "baoCao"),
+        ]),
+    ]);
+
     return React.createElement(React.Fragment, null, [
-        React.createElement("h2", { key: "title", style: { fontFamily: "'Fraunces', serif", fontSize: 26, fontWeight: 600, marginBottom: 6 } }, "Kế hoạch tuần"),
-        React.createElement("p", { key: "sub", style: { color: COLORS.inkSoft, fontSize: 13.5, marginBottom: 20 } }, "Ghi chú kế hoạch & chỉ tiêu theo tuần cho từng mảng — doanh thu tự so sánh với tuần trước từ dữ liệu đã tải, các mảng còn lại ghi chú tay."),
-        weekNav, revenueCard, ...sectionCards,
+        React.createElement("p", { key: "sub", style: { color: COLORS.inkSoft, fontSize: 13.5, marginBottom: 20 } }, "Ghi chú kế hoạch & chỉ tiêu theo tuần cho từng mảng — mỗi ô tự đối chiếu với ghi chú tuần trước ngay bên dưới. Dữ liệu lưu trên Firebase, đồng bộ trên mọi thiết bị đăng nhập cùng tài khoản."),
+        weekNav, historyPanel, ...sectionCards, matBangCard,
         React.createElement("div", { key: "save", style: { display: "flex", alignItems: "center", gap: 12 } }, [
             React.createElement("button", { key: "btn", onClick: handleSave, disabled: saving, style: { padding: "10px 20px", background: COLORS.pine, color: "#fff", border: "none", borderRadius: 8, fontSize: 13.5, fontWeight: 600, cursor: saving ? "default" : "pointer", opacity: saving ? 0.7 : 1 } }, saving ? "Đang lưu..." : "💾 Lưu kế hoạch tuần"),
-            savedAt && React.createElement("span", { key: "s", style: { fontSize: 12, color: COLORS.inkSoft } }, `Đã lưu lúc ${savedAt.toLocaleTimeString("vi-VN")}`),
+            savedAt && React.createElement("span", { key: "s", style: { fontSize: 12, color: COLORS.pine, fontWeight: 600 } }, `✅ Đã lưu lúc ${savedAt.toLocaleTimeString("vi-VN")} — đã đồng bộ, mở lại trang vẫn còn.`),
         ]),
     ]);
 }
