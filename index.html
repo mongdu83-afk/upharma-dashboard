@@ -772,7 +772,7 @@ async function parseInventoryFile(file) {
         totalQty += qty;
         skuSet.add(code);
         if (!byShop[shop])
-            byShop[shop] = { shop, value: 0, qty: 0, skuSet: new Set(), expiredValue: 0, expiredCount: 0, nearExpireValue: 0, nearExpireCount: 0 };
+            byShop[shop] = { shop, value: 0, qty: 0, skuSet: new Set(), expiredValue: 0, expiredCount: 0, nearExpireValue: 0, nearExpireCount: 0, b6mValue: 0, b6mCount: 0, b12mValue: 0, b12mCount: 0 };
         byShop[shop].value += value;
         byShop[shop].qty += qty;
         byShop[shop].skuSet.add(code);
@@ -802,8 +802,16 @@ async function parseInventoryFile(file) {
                 byShop[shop].nearExpireValue += value;
                 byShop[shop].nearExpireCount += 1;
             }
+            else if (daysToExpiry <= 180) {
+                byShop[shop].b6mValue += value;
+                byShop[shop].b6mCount += 1;
+            }
+            else if (daysToExpiry <= 365) {
+                byShop[shop].b12mValue += value;
+                byShop[shop].b12mCount += 1;
+            }
             if (daysToExpiry <= 90) {
-                alerts.push({ shop, code, name, batch, qty, unit, value, daysToExpiry, expiryDate: expiryDate ? expiryDate.toISOString().slice(0, 10) : null });
+                alerts.push({ shop, code, name, batch, qty, unit, value, daysToExpiry, expiryDate: expiryDate ? toISODateLocal(expiryDate) : null });
             }
         }
     }
@@ -811,6 +819,7 @@ async function parseInventoryFile(file) {
     const shopAgg = Object.values(byShop).map((s) => ({
         shop: s.shop, value: s.value, qty: s.qty, skuCount: s.skuSet.size,
         expiredValue: s.expiredValue, expiredCount: s.expiredCount, nearExpireValue: s.nearExpireValue, nearExpireCount: s.nearExpireCount,
+        b6mValue: s.b6mValue, b6mCount: s.b6mCount, b12mValue: s.b12mValue, b12mCount: s.b12mCount,
     })).sort((a, b) => b.value - a.value);
     const topProducts = Object.values(productMap).map((p) => ({
         code: p.code, name: p.name, qty: p.qty, value: p.value, shopCount: p.shops.size,
@@ -820,6 +829,8 @@ async function parseInventoryFile(file) {
             fileName: file.name, uploadedAt: new Date().toISOString(), rowCount, totalValue, totalQty,
             skuCount: skuSet.size, expiredCount: alerts.filter((a) => a.daysToExpiry < 0).length,
             nearExpireCount: alerts.filter((a) => a.daysToExpiry >= 0).length,
+            b6mValue: Object.values(byShop).reduce((a, s) => a + s.b6mValue, 0), b6mCount: Object.values(byShop).reduce((a, s) => a + s.b6mCount, 0),
+            b12mValue: Object.values(byShop).reduce((a, s) => a + s.b12mValue, 0), b12mCount: Object.values(byShop).reduce((a, s) => a + s.b12mCount, 0),
         },
         shopAgg, topProducts, alerts: alerts.slice(0, 500), categoryUpdates,
         categoryValueAgg: Object.values(byNganh).sort((a, b) => b.value - a.value),
@@ -1463,6 +1474,36 @@ function InventoryView({ shopConfig }) {
         .filter((s) => (!fromDate || s.periodDate >= fromDate) && (!toDate || s.periodDate <= toDate))
         .map((s) => ({ label: s.label, value: s.meta.totalValue, date: s.periodDate }))
         .sort((a, b) => new Date(a.date) - new Date(b.date))), [snapshots, fromDate, toDate]);
+    // So sánh 2 kỳ tồn kho gần nhất (theo thời gian tải lên) — tổng quan + theo mốc hạn dùng + theo từng cửa hàng
+    const latestTwoCompare = useMemo(() => {
+        const sorted = [...snapshots].sort((a, b) => new Date(b.periodDate) - new Date(a.periodDate));
+        if (sorted.length < 2) return null;
+        const [now, prev] = sorted;
+        function pct(a, b) { return b ? ((a - b) / b) * 100 : null; }
+        const buckets = [
+            { key: "expiredValue", cKey: "expiredCount", label: "Đã hết hạn" },
+            { key: "nearExpireValue", cKey: "nearExpireCount", label: "Dưới 3 tháng" },
+            { key: "b6mValue", cKey: "b6mCount", label: "3 – 6 tháng" },
+            { key: "b12mValue", cKey: "b12mCount", label: "6 – 12 tháng" },
+        ];
+        const sumBucket = (snap, key) => (snap.shopAgg || []).reduce((a, s) => a + (s[key] || 0), 0);
+        const bucketRows = buckets.map((b) => ({
+            label: b.label, nowValue: sumBucket(now, b.key), prevValue: sumBucket(prev, b.key),
+            nowCount: sumBucket(now, b.cKey), prevCount: sumBucket(prev, b.cKey),
+        }));
+        const shopNames = [...new Set([...(now.shopAgg || []), ...(prev.shopAgg || [])].map((s) => s.shop))];
+        const byShopRows = shopNames.map((shop) => {
+            const n = (now.shopAgg || []).find((s) => s.shop === shop) || { value: 0, expiredCount: 0, nearExpireCount: 0 };
+            const p = (prev.shopAgg || []).find((s) => s.shop === shop) || { value: 0, expiredCount: 0, nearExpireCount: 0 };
+            return { shop, nowValue: n.value || 0, prevValue: p.value || 0, changePct: pct(n.value || 0, p.value || 0),
+                nowExpired: n.expiredCount || 0, prevExpired: p.expiredCount || 0 };
+        }).sort((a, b) => b.nowValue - a.nowValue);
+        return {
+            nowLabel: now.label, prevLabel: prev.label, nowDate: now.periodDate, prevDate: prev.periodDate,
+            nowTotal: now.meta.totalValue, prevTotal: prev.meta.totalValue, totalChangePct: pct(now.meta.totalValue, prev.meta.totalValue),
+            bucketRows, byShopRows,
+        };
+    }, [snapshots]);
     return (React.createElement(React.Fragment, null,
         React.createElement("div", { style: { display: "flex", gap: 4, marginBottom: 20 } }, [{ id: "period", label: "Theo kỳ" }, { id: "compare", label: "So sánh theo kỳ" }].map((t) => (React.createElement("button", { key: t.id, onClick: () => setSubTab(t.id), style: {
                 padding: "7px 14px", borderRadius: 20, border: `1px solid ${subTab === t.id ? COLORS.pine : COLORS.line}`,
@@ -1587,6 +1628,37 @@ function InventoryView({ shopConfig }) {
                     inventoryTrend.length,
                     " k\u1EF3)"),
                 inventoryTrend.length < 2 ? (React.createElement("div", { style: { color: COLORS.inkSoft, fontSize: 13 } }, "C\u1EA7n \u00EDt nh\u1EA5t 2 k\u1EF3 t\u1ED3n kho trong kho\u1EA3ng \u0111\u00E3 ch\u1ECDn \u0111\u1EC3 so s\u00E1nh.")) : (React.createElement(LineChartTime, { data: inventoryTrend, labelKey: "label", valueKey: "value", color: COLORS.amber, ariaLabel: "Bi\u1EC3u \u0111\u1ED3 gi\u00E1 tr\u1ECB t\u1ED3n kho qua c\u00E1c k\u1EF3" }))),
+            latestTwoCompare && React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 16 } }, [
+                React.createElement("div", { key: "t", style: titleStyle }, `So s\u00E1nh 2 k\u1EF3 g\u1EA7n nh\u1EA5t: "${latestTwoCompare.nowLabel}" (${latestTwoCompare.nowDate}) so v\u1EDBi "${latestTwoCompare.prevLabel}" (${latestTwoCompare.prevDate})`),
+                React.createElement("div", { key: "kpis", style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 } }, [
+                    React.createElement(KpiCard, { key: "now", label: "T\u1ED5ng t\u1ED3n kho k\u1EF3 n\u00E0y", value: fmtVND(latestTwoCompare.nowTotal) }),
+                    React.createElement(KpiCard, { key: "prev", label: "T\u1ED5ng t\u1ED3n kho k\u1EF3 tr\u01B0\u1EDBc", value: fmtVND(latestTwoCompare.prevTotal) }),
+                    React.createElement(KpiCard, { key: "chg", label: "% thay \u0111\u1ED5i", value: latestTwoCompare.totalChangePct == null ? "\u2014" : `${latestTwoCompare.totalChangePct >= 0 ? "+" : ""}${latestTwoCompare.totalChangePct.toFixed(1)}%`, tone: latestTwoCompare.totalChangePct != null && latestTwoCompare.totalChangePct > 0 ? "warn" : "good" }),
+                ]),
+                React.createElement("div", { key: "bt", style: { fontSize: 13, fontWeight: 600, marginBottom: 8 } }, "Theo m\u1ED1c h\u1EA1n d\u00F9ng"),
+                React.createElement("table", { key: "btbl", style: { width: "100%", borderCollapse: "collapse", fontSize: 13, marginBottom: 18 } }, [
+                    React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase" } }, ["M\u1ED1c h\u1EA1n d\u00F9ng", "Gi\u00E1 tr\u1ECB k\u1EF3 n\u00E0y", "S\u1ED1 l\u00F4 k\u1EF3 n\u00E0y", "Gi\u00E1 tr\u1ECB k\u1EF3 tr\u01B0\u1EDBc", "S\u1ED1 l\u00F4 k\u1EF3 tr\u01B0\u1EDBc"].map((h, i) => React.createElement("th", { key: i, style: { padding: "6px 8px", textAlign: i > 0 ? "right" : "left" } }, h)))),
+                    React.createElement("tbody", { key: "b" }, latestTwoCompare.bucketRows.map((r) => React.createElement("tr", { key: r.label, style: { borderTop: `1px solid ${COLORS.line}` } }, [
+                        React.createElement("td", { key: "l", style: { padding: "8px" } }, r.label),
+                        React.createElement("td", { key: "nv", style: { padding: "8px", textAlign: "right", fontWeight: 600 } }, fmtVND(r.nowValue)),
+                        React.createElement("td", { key: "nc", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.nowCount)),
+                        React.createElement("td", { key: "pv", style: { padding: "8px", textAlign: "right", color: COLORS.inkSoft } }, fmtVND(r.prevValue)),
+                        React.createElement("td", { key: "pc", style: { padding: "8px", textAlign: "right", color: COLORS.inkSoft } }, fmtNum(r.prevCount)),
+                    ]))),
+                ]),
+                React.createElement("div", { key: "st", style: { fontSize: 13, fontWeight: 600, marginBottom: 8 } }, "Theo c\u1EEDa h\u00E0ng"),
+                React.createElement("table", { key: "stbl", style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } }, [
+                    React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase" } }, ["C\u1EEDa h\u00E0ng", "T\u1ED3n kho k\u1EF3 n\u00E0y", "T\u1ED3n kho k\u1EF3 tr\u01B0\u1EDBc", "% thay \u0111\u1ED5i", "H\u1EBFt h\u1EA1n k\u1EF3 n\u00E0y", "H\u1EBFt h\u1EA1n k\u1EF3 tr\u01B0\u1EDBc"].map((h, i) => React.createElement("th", { key: i, style: { padding: "6px 8px", textAlign: i > 0 ? "right" : "left" } }, h)))),
+                    React.createElement("tbody", { key: "b" }, latestTwoCompare.byShopRows.map((r) => React.createElement("tr", { key: r.shop, style: { borderTop: `1px solid ${COLORS.line}` } }, [
+                        React.createElement("td", { key: "s", style: { padding: "8px", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 } }, r.shop),
+                        React.createElement("td", { key: "n", style: { padding: "8px", textAlign: "right" } }, fmtVND(r.nowValue)),
+                        React.createElement("td", { key: "p", style: { padding: "8px", textAlign: "right", color: COLORS.inkSoft } }, fmtVND(r.prevValue)),
+                        React.createElement("td", { key: "c", style: { padding: "8px", textAlign: "right", fontWeight: 600, color: r.changePct == null ? COLORS.inkSoft : (r.changePct > 0 ? COLORS.clay : COLORS.pine) } }, r.changePct == null ? "\u2014" : `${r.changePct >= 0 ? "+" : ""}${r.changePct.toFixed(1)}%`),
+                        React.createElement("td", { key: "ne", style: { padding: "8px", textAlign: "right" } }, r.nowExpired),
+                        React.createElement("td", { key: "pe", style: { padding: "8px", textAlign: "right", color: COLORS.inkSoft } }, r.prevExpired),
+                    ]))),
+                ]),
+            ]),
             React.createElement("div", { style: { ...cardStyle, background: COLORS.card } },
                 React.createElement("div", { style: titleStyle }, "B\u1EA3ng gi\u00E1 tr\u1ECB t\u1ED3n kho theo k\u1EF3"),
                 inventoryTrend.length === 0 ? React.createElement("div", { style: { color: COLORS.inkSoft, fontSize: 13 } }, "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u.") : (React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
@@ -2137,9 +2209,9 @@ function RevenueView({ shopConfig }) {
                     React.createElement("input", { type: "date", value: rangeTo, onChange: (e) => setRangeTo(e.target.value), min: rangeMinDate, max: rangeMaxDate, style: selectStyle }),
                     [
                         { label: "Hôm nay", get: () => [todayISO(), todayISO()] },
-                        { label: "7 ngày qua", get: () => { const t = new Date(); const f = new Date(); f.setDate(t.getDate() - 6); return [f.toISOString().slice(0, 10), todayISO()]; } },
-                        { label: "30 ngày qua", get: () => { const t = new Date(); const f = new Date(); f.setDate(t.getDate() - 29); return [f.toISOString().slice(0, 10), todayISO()]; } },
-                        { label: "Tháng này", get: () => { const t = new Date(); const f = new Date(t.getFullYear(), t.getMonth(), 1); return [f.toISOString().slice(0, 10), todayISO()]; } },
+                        { label: "7 ngày qua", get: () => { const f = new Date(); f.setDate(f.getDate() - 6); return [toISODateLocal(f), todayISO()]; } },
+                        { label: "30 ngày qua", get: () => { const f = new Date(); f.setDate(f.getDate() - 29); return [toISODateLocal(f), todayISO()]; } },
+                        { label: "Tháng này", get: () => { const t = new Date(); const f = new Date(t.getFullYear(), t.getMonth(), 1); return [toISODateLocal(f), todayISO()]; } },
                         { label: "Tất cả", get: () => [rangeMinDate || "", rangeMaxDate || ""] },
                     ].map((p) => (React.createElement("button", { key: p.label, type: "button", onClick: () => { const [f, t] = p.get(); setRangeFrom(f); setRangeTo(t); }, style: { padding: "6px 10px", background: "transparent", border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 12, color: COLORS.inkSoft } }, p.label))),
                     React.createElement("span", { style: { fontSize: 12, color: COLORS.inkSoft } }, "T\u00EDnh tr\u00EAn to\u00E0n b\u1ED9 d\u1EEF li\u1EC7u doanh thu \u0111\u00E3 c\u00F3, g\u1ED9p theo Ng\u00E0y v\u00E0o s\u1ED5 \u2014 kh\u00F4ng ph\u1EE5 thu\u1ED9c file n\u00E0o \u0111\u01B0\u1EE3c t\u1EA3i l\u00EAn khi n\u00E0o."))),
@@ -3551,9 +3623,9 @@ function CustomerView({ shopConfig }) {
             if (daysSupply != null) {
                 const last = new Date(r.lastDate + "T00:00:00");
                 const ro = new Date(last.getTime() + daysSupply * 86400000);
-                runOutDate = ro.toISOString().slice(0, 10);
+                runOutDate = toISODateLocal(ro);
                 const cd = new Date(ro.getTime() - callBufferDays * 86400000);
-                callDate = cd.toISOString().slice(0, 10);
+                callDate = toISODateLocal(cd);
                 statusDays = Math.round((new Date(runOutDate + "T00:00:00") - new Date(todayStr + "T00:00:00")) / 86400000);
             }
             const cat = categoryMap[r.productCode];
@@ -4522,21 +4594,28 @@ function DataManagementView() {
     ]);
 }
 // ---------- Kế hoạch tuần ----------
+function toISODateLocal(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 function mondayOf(dateISO) {
-    const d = new Date(dateISO + "T00:00:00");
-    const day = d.getDay(); // 0=CN
+    // Dùng giờ địa phương xuyên suốt — tránh lỗi lùi 1 ngày do toISOString() quy đổi sang UTC
+    // (Việt Nam UTC+7: nửa đêm giờ VN vẫn còn là "hôm qua" theo UTC).
+    const [y, m, dd] = dateISO.split("-").map(Number);
+    const d = new Date(y, m - 1, dd);
+    const day = d.getDay(); // 0=CN, 1=T2 ... 6=T7
     const diff = day === 0 ? -6 : 1 - day;
     d.setDate(d.getDate() + diff);
-    return d.toISOString().slice(0, 10);
+    return toISODateLocal(d);
 }
 function weekLabel(mondayISO) {
     const sunday = addDaysISO(mondayISO, 6);
     return `${fmtDMY(mondayISO)} — ${fmtDMY(sunday)}`;
 }
 function addDaysISO(iso, n) {
-    const d = new Date(iso + "T00:00:00");
+    const [y, m, dd] = iso.split("-").map(Number);
+    const d = new Date(y, m - 1, dd);
     d.setDate(d.getDate() + n);
-    return d.toISOString().slice(0, 10);
+    return toISODateLocal(d);
 }
 function fmtDMY(iso) {
     const [y, m, d] = iso.split("-");
@@ -4547,10 +4626,11 @@ function weekPlanHasContent(plan) {
     return Object.values(plan).some((s) => s && (s.ghiChu || s.chiTieu || s.baoCao));
 }
 const WEEKPLAN_SECTIONS = [
-    { key: "nhanSu", label: "👥 Nhân sự", color: COLORS.pine },
     { key: "doanhThu", label: "💰 Doanh thu", color: COLORS.amber },
+    { key: "nhanSu", label: "👥 Nhân sự", color: COLORS.pine },
     { key: "hangHoa", label: "📦 Hàng hoá", color: COLORS.amber },
     { key: "coSoVatChat", label: "🏬 Cơ sở vật chất", color: COLORS.clay },
+    { key: "matBang", label: "🏢 Mặt bằng", color: COLORS.pine },
 ];
 function WeeklyPlanView({ shopConfig }) {
     const [weekStart, setWeekStart] = useState(mondayOf(todayISO()));
@@ -4562,14 +4642,77 @@ function WeeklyPlanView({ shopConfig }) {
     const [savedAt, setSavedAt] = useState(null);
     const [showHistory, setShowHistory] = useState(false);
     const [jumpDate, setJumpDate] = useState("");
+    const [periods, setPeriods] = useState([]);
+    const [inventory, setInventory] = useState([]);
+    const [customers, setCustomers] = useState([]);
+    const [aiLoading, setAiLoading] = useState(false);
+    const [aiError, setAiError] = useState(null);
+    const [aiSuggestion, setAiSuggestion] = useState(null);
 
     useEffect(() => { const u = subscribeWeeklyPlan(weekStart, setPlan); return u; }, [weekStart]);
     useEffect(() => { const u = subscribeWeeklyPlan(addDaysISO(weekStart, -7), setPrevPlan); return u; }, [weekStart]);
     useEffect(() => { const u = subscribeWeeklyPlansList(setAllPlans); return u; }, []);
+    useEffect(() => { const u = subscribePeriods(setPeriods); return u; }, []);
+    useEffect(() => { const u = subscribeInventory(setInventory); return u; }, []);
+    useEffect(() => { const u = subscribeCustomers(setCustomers); return u; }, []);
     useEffect(() => {
         setDraft(plan || {});
         setSavedAt(null);
+        setAiSuggestion(null);
+        setAiError(null);
     }, [plan, weekStart]);
+
+    // Gộp doanh thu theo ngày từ mọi kỳ đã tải, dùng để tóm tắt xu hướng tuần này/tuần trước cho AI
+    const dateRevenueMap = useMemo(() => {
+        const map = {};
+        for (const p of periods) {
+            if (!p.timeseries) continue;
+            for (const d of p.timeseries) map[d.date] = (map[d.date] || 0) + d.revenue;
+        }
+        return map;
+    }, [periods]);
+    function sumWeek(mondayISO) {
+        let sum = 0, hasData = false;
+        for (let i = 0; i < 7; i++) {
+            const dt = addDaysISO(mondayISO, i);
+            if (dateRevenueMap[dt] != null) { sum += dateRevenueMap[dt]; hasData = true; }
+        }
+        return { sum, hasData };
+    }
+    const latestInventory = inventory.length ? inventory[inventory.length - 1] : null;
+    const latestCustomers = customers.length ? customers[customers.length - 1] : null;
+
+    async function runAiSuggest() {
+        setAiLoading(true); setAiError(null); setAiSuggestion(null);
+        try {
+            const thisW = sumWeek(weekStart), lastW = sumWeek(addDaysISO(weekStart, -7));
+            const revenue = {
+                doanhThuTuanNay: thisW.hasData ? Math.round(thisW.sum) : null,
+                doanhThuTuanTruoc: lastW.hasData ? Math.round(lastW.sum) : null,
+                thayDoiPhanTram: (thisW.hasData && lastW.hasData && lastW.sum > 0) ? Number((((thisW.sum - lastW.sum) / lastW.sum) * 100).toFixed(1)) : null,
+            };
+            const inventorySummary = latestInventory ? {
+                tenFile: latestInventory.label, tongGiaTriTonKho: Math.round(((latestInventory.meta || {}).totalValue) || 0),
+                soLoHetHan: ((latestInventory.meta || {}).expiredCount) || 0, soLoCanHan: ((latestInventory.meta || {}).nearExpireCount) || 0,
+                topCuaHangTonNhieu: (latestInventory.shopAgg || []).slice(0, 5).map((s) => ({ shop: s.shop, giaTriTonKho: Math.round(s.value), soLoHetHan: s.expiredCount, soLoCanHan: s.nearExpireCount })),
+            } : null;
+            const customersSummary = latestCustomers ? {
+                tenFile: latestCustomers.label, tongSoKhach: (latestCustomers.meta || {}).rowCount || 0,
+                giaTriTrungBinhMoiKhach: Math.round(((latestCustomers.meta || {}).avgValuePerCustomer) || 0),
+                theoHang: (latestCustomers.tierAgg || []).map((t) => ({ hang: t.tier, soLuong: t.count, tongGiaTri: Math.round(t.totalValue) })),
+            } : null;
+            const resp = await fetch("/.netlify/functions/suggest-weekplan", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ weekLabel: weekLabel(weekStart), revenue, inventory: inventorySummary, customers: customersSummary, prevPlan: prevPlan || null }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || "Không gọi được AI gợi ý.");
+            setAiSuggestion(data.suggestion);
+        } catch (e) {
+            setAiError(e.message || "Có lỗi khi gọi AI gợi ý.");
+        }
+        setAiLoading(false);
+    }
 
     function updateField(section, field, value) {
         setDraft((d) => ({ ...d, [section]: { ...(d[section] || {}), [field]: value } }));
@@ -4627,18 +4770,20 @@ function WeeklyPlanView({ shopConfig }) {
         ]);
     });
 
-    const matBangCard = React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 16, borderLeft: `4px solid ${COLORS.pine}` } }, [
-        React.createElement("div", { key: "t", style: { ...titleStyle, marginBottom: 12 } }, "🏢 Mặt bằng"),
-        React.createElement("label", { key: "l", style: { fontSize: 12, fontWeight: 600, marginBottom: 5, display: "block" } }, "Báo cáo về mặt bằng tuần này"),
-        React.createElement("textarea", { key: "i", rows: 4, value: ((draft.matBang || {}).baoCao) || "", onChange: (e) => updateField("matBang", "baoCao", e.target.value), style: { width: "100%", padding: "9px 10px", border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 13.5, fontFamily: "inherit", marginBottom: 8 } }),
-        React.createElement("div", { key: "prev", style: { fontSize: 11.5, color: COLORS.inkSoft, background: COLORS.paper, borderRadius: 7, padding: "7px 9px" } }, [
-            React.createElement("b", { key: "b" }, "Tuần trước: "), prevText("matBang", "baoCao"),
+    const aiCardChildren = [
+        React.createElement("div", { key: "t", style: { ...titleStyle, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 } }, [
+            React.createElement("span", { key: "l" }, "🤖 Gợi ý kế hoạch tuần bằng AI"),
+            React.createElement("button", { key: "btn", onClick: runAiSuggest, disabled: aiLoading, style: { padding: "9px 16px", background: COLORS.amber, color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: aiLoading ? "default" : "pointer", opacity: aiLoading ? 0.7 : 1 } }, aiLoading ? "Đang phân tích..." : "Gợi ý kế hoạch tuần"),
         ]),
-    ]);
+    ];
+    if (aiError) aiCardChildren.push(React.createElement("div", { key: "err", style: { color: COLORS.clay, fontSize: 13 } }, aiError));
+    if (aiSuggestion) aiCardChildren.push(React.createElement("div", { key: "res", style: { whiteSpace: "pre-wrap", fontSize: 13.5, lineHeight: 1.6, marginTop: 10 } }, aiSuggestion));
+    if (!aiSuggestion && !aiError && !aiLoading) aiCardChildren.push(React.createElement("div", { key: "hint", style: { fontSize: 12, color: COLORS.inkSoft } }, "AI sẽ đọc số liệu doanh thu tuần trước, tồn kho và khách hàng gần nhất đã tải lên để gợi ý nội dung cho từng mục bên dưới — bạn xem qua rồi tự điền/chỉnh vào các ô, AI không tự động ghi đè gì cả."));
+    const aiCard = React.createElement("div", { style: { ...cardStyle, background: COLORS.card, marginBottom: 16, border: `2px solid ${COLORS.amber}` } }, aiCardChildren);
 
     return React.createElement(React.Fragment, null, [
         React.createElement("p", { key: "sub", style: { color: COLORS.inkSoft, fontSize: 13.5, marginBottom: 20 } }, "Ghi chú kế hoạch & chỉ tiêu theo tuần cho từng mảng — mỗi ô tự đối chiếu với ghi chú tuần trước ngay bên dưới. Dữ liệu lưu trên Firebase, đồng bộ trên mọi thiết bị đăng nhập cùng tài khoản."),
-        weekNav, historyPanel, ...sectionCards, matBangCard,
+        weekNav, historyPanel, aiCard, ...sectionCards,
         React.createElement("div", { key: "save", style: { display: "flex", alignItems: "center", gap: 12 } }, [
             React.createElement("button", { key: "btn", onClick: handleSave, disabled: saving, style: { padding: "10px 20px", background: COLORS.pine, color: "#fff", border: "none", borderRadius: 8, fontSize: 13.5, fontWeight: 600, cursor: saving ? "default" : "pointer", opacity: saving ? 0.7 : 1 } }, saving ? "Đang lưu..." : "💾 Lưu kế hoạch tuần"),
             savedAt && React.createElement("span", { key: "s", style: { fontSize: 12, color: COLORS.pine, fontWeight: 600 } }, `✅ Đã lưu lúc ${savedAt.toLocaleTimeString("vi-VN")} — đã đồng bộ, mở lại trang vẫn còn.`),
