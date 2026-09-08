@@ -5101,9 +5101,30 @@ const TABS = [
     { id: "weekplan", label: "Kế hoạch tuần" },
     { id: "data", label: "Quản lý dữ liệu" },
 ];
+// Bọc React.memo cho từng view của tab: nếu không có cái này, mỗi lần đổi tab đang xem thì Dashboard
+// re-render lại, kéo theo TẤT CẢ các tab đã từng mở (đang ẩn) cũng phải render lại toàn bộ cây JSX của
+// nó (dù state/hook bên trong không mất) — càng mở nhiều tab trong 1 phiên thì chuyển tab càng chậm dần.
+// React.memo giúp 1 tab đang ẩn bỏ qua việc render lại nếu props (shopConfig) không đổi.
+const RevenueViewMemo = React.memo(RevenueView);
+const InventoryViewMemo = React.memo(InventoryView);
+const EmployeeViewMemo = React.memo(EmployeeView);
+const CategoryViewMemo = React.memo(CategoryView);
+const CustomerViewMemo = React.memo(CustomerView);
+const PromoViewMemo = React.memo(PromoView);
+const WeeklyPlanViewMemo = React.memo(WeeklyPlanView);
+const DataManagementViewMemo = React.memo(DataManagementView);
 function Dashboard({ user }) {
     var _a;
     const [activeTab, setActiveTab] = useState("revenue");
+    // Chỉ "mount" (tạo component + bắt đầu subscribe Firestore) cho 1 tab khi nó được mở lần đầu —
+    // rồi giữ nguyên trong DOM (ẩn bằng display) từ đó về sau. Nếu mount cả 8 tab ngay từ đầu thì
+    // trang sẽ load rất chậm (8 tab cùng lúc tải dữ liệu); còn nếu unmount khi rời tab thì bộ lọc/kỳ
+    // đang xem của tab đó bị mất mỗi lần quay lại — cách này vừa nhanh vừa không bị mất gì.
+    const [visitedTabs, setVisitedTabs] = useState(() => new Set(["revenue"]));
+    function selectTab(id) {
+        setActiveTab(id);
+        setVisitedTabs((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+    }
     const [shopConfig, setShopConfig] = useState({});
     const [showSettings, setShowSettings] = useState(false);
     useEffect(() => {
@@ -5127,7 +5148,7 @@ function Dashboard({ user }) {
                 React.createElement("img", { src: LOGO_DATA_URI, alt: "Upharma", style: { width: 28, height: 28, objectFit: "contain" } }),
                 React.createElement("div", { style: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 700, letterSpacing: 1.5, color: "#fff" } }, "UPHARMA")),
             React.createElement("div", { style: { fontFamily: "'Fraunces', serif", fontSize: 17, fontWeight: 600, marginBottom: 26, padding: "0 8px", color: "#fff" } }, "B\u00E1o c\u00E1o kinh doanh"),
-            React.createElement("nav", { style: { display: "flex", flexDirection: "column", gap: 2 } }, TABS.map((t) => (React.createElement("button", { key: t.id, onClick: () => setActiveTab(t.id), style: {
+            React.createElement("nav", { style: { display: "flex", flexDirection: "column", gap: 2 } }, TABS.map((t) => (React.createElement("button", { key: t.id, onClick: () => selectTab(t.id), style: {
                     textAlign: "left", padding: "10px 12px", borderRadius: 8, border: "none",
                     background: activeTab === t.id ? COLORS.amber : "transparent",
                     color: "#fff",
@@ -5140,18 +5161,15 @@ function Dashboard({ user }) {
         React.createElement("main", { style: { flex: 1, minWidth: 0, padding: "32px 40px 60px" } },
             React.createElement("h1", { style: { fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 28, marginBottom: 24 } }, (_a = TABS.find((t) => t.id === activeTab)) === null || _a === void 0 ? void 0 : _a.label),
             [
-                { id: "revenue", el: React.createElement(RevenueView, { shopConfig: shopConfig }) },
-                { id: "inventory", el: React.createElement(InventoryView, { shopConfig: shopConfig }) },
-                { id: "employee", el: React.createElement(EmployeeView, { shopConfig: shopConfig }) },
-                { id: "category", el: React.createElement(CategoryView, null) },
-                { id: "customer", el: React.createElement(CustomerView, { shopConfig: shopConfig }) },
-                { id: "promo", el: React.createElement(PromoView, { shopConfig: shopConfig }) },
-                { id: "weekplan", el: React.createElement(WeeklyPlanView, { shopConfig: shopConfig }) },
-                { id: "data", el: React.createElement(DataManagementView, null) },
-                // Mỗi tab được giữ luôn trong DOM (chỉ ẩn/hiện bằng display) thay vì render có điều kiện —
-                // để khi chuyển qua lại giữa các tab, bộ lọc/kỳ đang chọn/dữ liệu đang xem của tab cũ
-                // không bị mất, không phải chọn lại từ đầu.
-            ].map((t) => React.createElement("div", { key: t.id, style: { display: activeTab === t.id ? "block" : "none" } }, t.el))),
+                { id: "revenue", make: () => React.createElement(RevenueViewMemo, { shopConfig: shopConfig }) },
+                { id: "inventory", make: () => React.createElement(InventoryViewMemo, { shopConfig: shopConfig }) },
+                { id: "employee", make: () => React.createElement(EmployeeViewMemo, { shopConfig: shopConfig }) },
+                { id: "category", make: () => React.createElement(CategoryViewMemo, null) },
+                { id: "customer", make: () => React.createElement(CustomerViewMemo, { shopConfig: shopConfig }) },
+                { id: "promo", make: () => React.createElement(PromoViewMemo, { shopConfig: shopConfig }) },
+                { id: "weekplan", make: () => React.createElement(WeeklyPlanViewMemo, { shopConfig: shopConfig }) },
+                { id: "data", make: () => React.createElement(DataManagementViewMemo, null) },
+            ].filter((t) => visitedTabs.has(t.id)).map((t) => React.createElement("div", { key: t.id, style: { display: activeTab === t.id ? "block" : "none" } }, t.make()))),
         showSettings && (React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 } },
             React.createElement("div", { style: { background: COLORS.card, borderRadius: 12, padding: 24, width: 420, maxHeight: "80vh", overflowY: "auto" } },
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 16 } },
