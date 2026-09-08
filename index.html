@@ -5139,14 +5139,19 @@ function Dashboard({ user }) {
             React.createElement("button", { onClick: () => auth.signOut(), style: { textAlign: "left", padding: "10px 12px", background: "transparent", border: "none", fontSize: 13, color: "#fff" } }, "\u0110\u0103ng xu\u1EA5t")),
         React.createElement("main", { style: { flex: 1, minWidth: 0, padding: "32px 40px 60px" } },
             React.createElement("h1", { style: { fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 28, marginBottom: 24 } }, (_a = TABS.find((t) => t.id === activeTab)) === null || _a === void 0 ? void 0 : _a.label),
-            activeTab === "revenue" && React.createElement(RevenueView, { shopConfig: shopConfig }),
-            activeTab === "inventory" && React.createElement(InventoryView, { shopConfig: shopConfig }),
-            activeTab === "employee" && React.createElement(EmployeeView, { shopConfig: shopConfig }),
-            activeTab === "category" && React.createElement(CategoryView, null),
-            activeTab === "customer" && React.createElement(CustomerView, { shopConfig: shopConfig }),
-            activeTab === "promo" && React.createElement(PromoView, { shopConfig: shopConfig }),
-            activeTab === "weekplan" && React.createElement(WeeklyPlanView, { shopConfig: shopConfig }),
-            activeTab === "data" && React.createElement(DataManagementView, null)),
+            [
+                { id: "revenue", el: React.createElement(RevenueView, { shopConfig: shopConfig }) },
+                { id: "inventory", el: React.createElement(InventoryView, { shopConfig: shopConfig }) },
+                { id: "employee", el: React.createElement(EmployeeView, { shopConfig: shopConfig }) },
+                { id: "category", el: React.createElement(CategoryView, null) },
+                { id: "customer", el: React.createElement(CustomerView, { shopConfig: shopConfig }) },
+                { id: "promo", el: React.createElement(PromoView, { shopConfig: shopConfig }) },
+                { id: "weekplan", el: React.createElement(WeeklyPlanView, { shopConfig: shopConfig }) },
+                { id: "data", el: React.createElement(DataManagementView, null) },
+                // Mỗi tab được giữ luôn trong DOM (chỉ ẩn/hiện bằng display) thay vì render có điều kiện —
+                // để khi chuyển qua lại giữa các tab, bộ lọc/kỳ đang chọn/dữ liệu đang xem của tab cũ
+                // không bị mất, không phải chọn lại từ đầu.
+            ].map((t) => React.createElement("div", { key: t.id, style: { display: activeTab === t.id ? "block" : "none" } }, t.el))),
         showSettings && (React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 } },
             React.createElement("div", { style: { background: COLORS.card, borderRadius: 12, padding: 24, width: 420, maxHeight: "80vh", overflowY: "auto" } },
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 16 } },
