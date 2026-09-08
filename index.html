@@ -33,6 +33,30 @@
     .no-print { display: none !important; }
     #print-area input, #print-area select, #print-area textarea { border: none !important; background: transparent !important; padding: 2px 0 !important; }
   }
+
+  /* ---- Các class dùng cho "Kế hoạch tuần" — theo format của app Nhân sự (Ops) ---- */
+  :root{
+    --wpInk:#20241F; --wpInkSoft:#5B5A50; --wpPaper:#F7F4EC; --wpLine:#E4DFD1;
+    --wpPine:#2E8B4F; --wpClay:#A8483C;
+  }
+  .card{ background:#fff; border:1px solid var(--wpLine); border-radius:12px; padding:16px 18px; }
+  .btn{ display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:600; padding:9px 15px; border-radius:8px; border:1px solid var(--wpLine); background:#fff; color:var(--wpInk); cursor:pointer; }
+  .btn:hover{ border-color:var(--wpPine); }
+  .weeklyCatBlock{ margin-bottom:20px; }
+  .weeklyCatTitle{ font-weight:700; font-size:13.5px; margin-bottom:9px; color:var(--wpInk); display:flex; align-items:center; gap:8px; }
+  .weeklyCatTitle .dot{ width:8px; height:8px; border-radius:50%; background:var(--wpPine); flex:none; }
+  .weeklyRow{ border:1px solid var(--wpLine); border-radius:10px; padding:10px 12px; margin-bottom:8px; background:#fff; }
+  .weeklyRowGrid{ display:flex; gap:10px; flex-wrap:wrap; align-items:flex-start; }
+  .weeklyRowGrid > div{ flex:1 1 220px; min-width:0; }
+  .weeklyRowLbl{ font-size:11px; font-weight:600; color:var(--wpInkSoft); margin-bottom:4px; display:block; }
+  .weeklyRowRemove{ border:none; background:none; color:var(--wpClay); cursor:pointer; font-size:11.5px; font-weight:600; padding:2px 4px; }
+  .taskResultInput{ padding:7px 9px; border:1px solid var(--wpLine); border-radius:6px; font-size:13px; width:100%; resize:vertical; font-family:inherit; min-height:34px; }
+  .autoGrow{ resize:none; overflow:hidden; min-height:38px; line-height:1.4; }
+  @media (max-width:720px){
+    .weeklyRowGrid{ flex-direction:column; gap:8px; }
+    .weeklyRowGrid textarea, .weeklyRowGrid input{ font-size:16px !important; padding:10px 10px; }
+    .weeklyRow{ padding:10px; }
+  }
 </style>
 </head>
 <body>
@@ -286,6 +310,15 @@ async function parseTargetFile(file) {
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
     if (!rows.length)
         throw new Error("File trống.");
+    // Mẫu mới, gọn 3 cột: "Mã nhà thuốc" | "Loại chỉ tiêu" | "Tháng X" — mỗi cửa hàng 2 dòng
+    // (Doanh số tổng / Doanh số hệ số), không có target nhân viên hay các chỉ tiêu khác.
+    const headerRow0 = (rows[0] || []).map((v) => norm(v));
+    const tidyShopCol = headerRow0.findIndex((h) => h.includes("manhathuoc") || h.includes("mashop"));
+    const tidyLoaiCol = headerRow0.findIndex((h) => h.includes("loaichitieu"));
+    const tidyMonthCol = headerRow0.findIndex((h) => /^th[aá]ng\s*\d{1,2}$/.test(h));
+    if (tidyShopCol !== -1 && tidyLoaiCol !== -1 && tidyMonthCol !== -1) {
+        return parseTargetFileTidy(rows, tidyShopCol, tidyLoaiCol, tidyMonthCol);
+    }
     let month = null;
     for (let i = 0; i < Math.min(rows.length, 10); i++) {
         const rowText = rows[i].map((v) => (v !== null && v !== void 0 ? v : "").toString()).join(" ");
@@ -330,6 +363,50 @@ async function parseTargetFile(file) {
     if (!Object.keys(targets).length)
         throw new Error("Không đọc được dòng target nào cho cửa hàng.");
     return { month, targets, employeeTargets };
+}
+// Ánh xạ tên "Loại chỉ tiêu" (đã bỏ dấu, thường hoá) sang field target tương ứng — dùng chung
+// cho các nhãn có thể gặp, dù mẫu hiện tại chỉ có "Doanh số tổng" và "Doanh số hệ số".
+const TARGET_METRIC_ALIASES = [
+    { key: "revenue", matches: ["doanhsotong", "doanhthu", "doanhthutong"] },
+    { key: "hangHeSo", matches: ["doanhsohesoso", "doanhsohese", "hangheso", "heso"] },
+    { key: "tbb", matches: ["trungbinhbill", "tbb"] },
+    { key: "khachHang", matches: ["khachhang"] },
+    { key: "bill", matches: ["bill", "sobill"] },
+    { key: "cskh", matches: ["cskh"] },
+];
+function targetMetricKeyFor(loaiRaw) {
+    const n = norm(loaiRaw);
+    for (const m of TARGET_METRIC_ALIASES) {
+        if (m.matches.some((needle) => n.includes(needle))) return m.key;
+    }
+    return null;
+}
+function parseTargetFileTidy(rows, shopCol, loaiCol, monthCol) {
+    const monthHeaderText = (rows[0][monthCol] || "").toString();
+    const mm = monthHeaderText.match(/(\d{1,2})/);
+    if (!mm) throw new Error(`Không đọc được số tháng từ tiêu đề cột "${monthHeaderText}".`);
+    const monthNum = Number(mm[1]);
+    // File không ghi năm — mặc định lấy năm hiện tại; nếu tháng đó đã lùi khá xa so với tháng hiện tại
+    // (nhiều hơn 1 tháng), coi như target khai báo trước cho năm sau.
+    const today = todayISO();
+    const currentYear = Number(today.slice(0, 4)), currentMonthNum = Number(today.slice(5, 7));
+    let year = currentYear;
+    if (monthNum < currentMonthNum - 1) year = currentYear + 1;
+    const month = `${year}-${String(monthNum).padStart(2, "0")}`;
+    const targets = {};
+    for (let i = 1; i < rows.length; i++) {
+        const r = rows[i];
+        const shop = (r[shopCol] != null ? r[shopCol] : "").toString().trim();
+        const loai = (r[loaiCol] != null ? r[loaiCol] : "").toString().trim();
+        if (!shop || !loai) continue;
+        const key = targetMetricKeyFor(loai);
+        if (!key) continue;
+        if (!targets[shop]) targets[shop] = {};
+        targets[shop][key] = parseNumber(r[monthCol]);
+    }
+    if (!Object.keys(targets).length)
+        throw new Error("Không đọc được dòng target nào cho cửa hàng.");
+    return { month, targets, employeeTargets: {} };
 }
 async function parseFile(file) {
     var _a, _b, _c, _d, _e, _f, _g, _h;
@@ -719,8 +796,10 @@ function detectInventoryColumns(headers) {
     }
     return map;
 }
-async function parseInventoryFile(file) {
+async function parseInventoryFile(file, coefficients, categoryMapForGroup) {
     var _a, _b, _c, _d, _e, _f, _g, _h;
+    coefficients = coefficients || {};
+    categoryMapForGroup = categoryMapForGroup || {};
     let rows = await readRowsBestSheet(file, (headers) => {
         const n = headers.map(norm);
         let score = 0;
@@ -741,6 +820,7 @@ async function parseInventoryFile(file) {
     }
     const byShop = {};
     const productMap = {};
+    const heSo1Map = {};
     const alerts = [];
     const byNganh = {};
     const categoryUpdates = {};
@@ -781,6 +861,14 @@ async function parseInventoryFile(file) {
         productMap[code].qty += qty;
         productMap[code].value += value;
         productMap[code].shops.add(shop);
+        const coefInfo = coefficients[code];
+        if (coefInfo && Number(coefInfo.heso != null ? coefInfo.heso : 1) === 1) {
+            if (!heSo1Map[code])
+                heSo1Map[code] = { code, name: coefInfo.name || name, qty: 0, value: 0, shops: new Set() };
+            heSo1Map[code].qty += qty;
+            heSo1Map[code].value += value;
+            heSo1Map[code].shops.add(shop);
+        }
         const rowNganh = colMap.nganh ? ((_f = r[colMap.nganh]) !== null && _f !== void 0 ? _f : "").toString().trim() : "";
         const rowNhom = colMap.nhom ? ((_g = r[colMap.nhom]) !== null && _g !== void 0 ? _g : "").toString().trim() : "";
         const rowLoai = colMap.loai ? ((_h = r[colMap.loai]) !== null && _h !== void 0 ? _h : "").toString().trim() : "";
@@ -824,6 +912,22 @@ async function parseInventoryFile(file) {
     const topProducts = Object.values(productMap).map((p) => ({
         code: p.code, name: p.name, qty: p.qty, value: p.value, shopCount: p.shops.size,
     })).sort((a, b) => b.value - a.value).slice(0, 100);
+    // Hàng hệ số 1: giữ TOÀN BỘ mã (không cắt top 100 như trên) vì đây là danh sách đã được chọn lọc
+    // sẵn (theo file hệ số tải lên), thường ít mã hơn nhiều so với toàn bộ tồn kho — rồi gộp theo
+    // Nhóm (DMHH) để cảnh báo tồn kho so với tốc độ bán theo từng nhóm.
+    const heSo1Products = Object.values(heSo1Map).map((p) => {
+        const cat = categoryMapForGroup[p.code] || {};
+        return { code: p.code, name: p.name, qty: p.qty, value: p.value, shopCount: p.shops.size, nhom: cat.nhom || cat.nganh || "Chưa phân loại" };
+    }).sort((a, b) => b.value - a.value);
+    const byHeSo1Group = {};
+    for (const p of heSo1Products) {
+        if (!byHeSo1Group[p.nhom])
+            byHeSo1Group[p.nhom] = { nhom: p.nhom, qty: 0, value: 0, skuCount: 0 };
+        byHeSo1Group[p.nhom].qty += p.qty;
+        byHeSo1Group[p.nhom].value += p.value;
+        byHeSo1Group[p.nhom].skuCount += 1;
+    }
+    const heSo1ByGroup = Object.values(byHeSo1Group).sort((a, b) => b.value - a.value);
     return {
         meta: {
             fileName: file.name, uploadedAt: new Date().toISOString(), rowCount, totalValue, totalQty,
@@ -834,6 +938,7 @@ async function parseInventoryFile(file) {
         },
         shopAgg, topProducts, alerts: alerts.slice(0, 500), categoryUpdates,
         categoryValueAgg: Object.values(byNganh).sort((a, b) => b.value - a.value),
+        heSo1Products, heSo1ByGroup,
     };
 }
 // ---------- customer parsing ----------
@@ -1420,6 +1525,10 @@ function InventoryView({ shopConfig }) {
     const [searchQuery, setSearchQuery] = useState("");
     const [showResolved, setShowResolved] = useState(false);
     const [categoryMap, setCategoryMap] = useState({});
+    const [coefficients, setCoefficients] = useState({});
+    const [periods, setPeriods] = useState([]);
+    const [velocityWindow, setVelocityWindow] = useState(30);
+    const [showNormalHeSo1, setShowNormalHeSo1] = useState(false);
     const [subTab, setSubTab] = useState("period");
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
@@ -1427,13 +1536,15 @@ function InventoryView({ shopConfig }) {
         const unsub = subscribeInventory((list) => { setSnapshots(list); if (!selectedId && list.length)
             setSelectedId(list[list.length - 1].id); });
         const unsub2 = subscribeProductCategories(setCategoryMap);
-        return () => { unsub(); unsub2(); };
+        const unsub3 = subscribeProductCoefficients(setCoefficients);
+        const unsub4 = subscribePeriods(setPeriods);
+        return () => { unsub(); unsub2(); unsub3(); unsub4(); };
     }, []);
     const current = snapshots.find((s) => s.id === selectedId) || null;
     async function handleFile(file, label, periodDate) {
         setError(null);
         try {
-            const parsed = await parseInventoryFile(file);
+            const parsed = await parseInventoryFile(file, coefficients, categoryMap);
             const { categoryUpdates, ...toSave } = parsed;
             await saveInventorySnapshot(label, toSave, periodDate);
         }
@@ -1504,8 +1615,59 @@ function InventoryView({ shopConfig }) {
             bucketRows, byShopRows,
         };
     }, [snapshots]);
+    // ---- Tồn kho hàng hệ số 1 so với tốc độ bán ----
+    // Gộp SL bán mỗi ngày theo mã sản phẩm từ các kỳ doanh thu đã tải (cần cột Mã sản phẩm) — dùng để tính
+    // tốc độ bán trung bình/ngày trong N ngày gần nhất, rồi so với tồn kho hệ số 1 hiện tại.
+    const mergedDailyProductForVelocity = useMemo(() => {
+        const rows = [];
+        for (const p of periods) {
+            if (!(p.meta && p.meta.hasProductCode) || !p.dailyProductAgg) continue;
+            rows.push(...p.dailyProductAgg);
+        }
+        return rows;
+    }, [periods]);
+    const heSo1VelocityDates = useMemo(() => [...new Set(mergedDailyProductForVelocity.map((d) => d.date))].sort(), [mergedDailyProductForVelocity]);
+    const heSo1Analysis = useMemo(() => {
+        const products = (current && current.heSo1Products) || null;
+        if (!products) return null;
+        const maxDate = heSo1VelocityDates[heSo1VelocityDates.length - 1];
+        let windowFrom = null, windowDays = velocityWindow;
+        if (maxDate) {
+            const d = new Date(maxDate);
+            d.setDate(d.getDate() - (velocityWindow - 1));
+            windowFrom = toISODateLocal(d);
+        }
+        const qtyByCode = {};
+        if (maxDate) {
+            for (const dp of mergedDailyProductForVelocity) {
+                if (dp.date < windowFrom || dp.date > maxDate) continue;
+                qtyByCode[dp.productCode] = (qtyByCode[dp.productCode] || 0) + dp.qty;
+            }
+        }
+        const rows = products.map((p) => {
+            const soldQty = qtyByCode[p.code] || 0;
+            const avgPerDay = maxDate ? soldQty / windowDays : null;
+            const daysCover = avgPerDay && avgPerDay > 0 ? p.qty / avgPerDay : null;
+            let status = "normal", statusLabel = "Bình thường", tone = "good";
+            if (!maxDate) {
+                status = "noSalesData"; statusLabel = "Chưa có dữ liệu bán"; tone = "neutral";
+            } else if (soldQty === 0 && p.qty > 0) {
+                status = "dead"; statusLabel = `Không bán được trong ${windowDays} ngày`; tone = "warn";
+            } else if (daysCover != null && daysCover < 7) {
+                status = "lowStock"; statusLabel = `Sắp hết hàng (~${daysCover.toFixed(1)} ngày)`; tone = "warn";
+            } else if (daysCover != null && daysCover > windowDays * 2) {
+                status = "slow"; statusLabel = `Tồn bán chậm (~${Math.round(daysCover)} ngày mới hết)`; tone = "warn";
+            }
+            return { ...p, soldQty, avgPerDay, daysCover, status, statusLabel, tone };
+        }).sort((a, b) => {
+            const rank = { dead: 0, lowStock: 1, slow: 2, noSalesData: 3, normal: 4 };
+            return rank[a.status] - rank[b.status] || b.value - a.value;
+        });
+        const warnCount = rows.filter((r) => r.status === "dead" || r.status === "lowStock" || r.status === "slow").length;
+        return { rows, warnCount, hasSalesData: !!maxDate, windowFrom, windowTo: maxDate };
+    }, [current, mergedDailyProductForVelocity, heSo1VelocityDates, velocityWindow]);
     return (React.createElement(React.Fragment, null,
-        React.createElement("div", { style: { display: "flex", gap: 4, marginBottom: 20 } }, [{ id: "period", label: "Theo kỳ" }, { id: "compare", label: "So sánh theo kỳ" }].map((t) => (React.createElement("button", { key: t.id, onClick: () => setSubTab(t.id), style: {
+        React.createElement("div", { style: { display: "flex", gap: 4, marginBottom: 20 } }, [{ id: "period", label: "Theo kỳ" }, { id: "compare", label: "So sánh theo kỳ" }, { id: "heso1", label: "Hàng hệ số 1" }].map((t) => (React.createElement("button", { key: t.id, onClick: () => setSubTab(t.id), style: {
                 padding: "7px 14px", borderRadius: 20, border: `1px solid ${subTab === t.id ? COLORS.pine : COLORS.line}`,
                 background: subTab === t.id ? COLORS.pineSoft : "transparent", color: subTab === t.id ? COLORS.pine : COLORS.inkSoft,
                 fontSize: 13, fontWeight: subTab === t.id ? 600 : 400,
@@ -1673,7 +1835,67 @@ function InventoryView({ shopConfig }) {
                         React.createElement("td", { style: { padding: "9px 8px", color: COLORS.inkSoft } }, r.date),
                         React.createElement("td", { style: { padding: "9px 8px", textAlign: "right" } }, fmtNum(r.value)),
                         React.createElement("td", { style: { padding: "9px 8px", textAlign: "right" } },
-                            React.createElement(ChangeBadge, { change: r.change })))))))))))));
+                            React.createElement(ChangeBadge, { change: r.change }))))))))))),
+        subTab === "heso1" && (React.createElement(React.Fragment, null,
+            !current ? React.createElement("div", { style: { color: COLORS.inkSoft, fontSize: 13 } }, "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u t\u1ED3n kho \u2014 t\u1EA3i t\u1ED3n kho l\u00EAn \u1EDF tab \"Theo k\u1EF3\" tr\u01B0\u1EDBc.")
+                : (!current.heSo1Products ? React.createElement("div", { style: { color: COLORS.inkSoft, fontSize: 13 } }, "K\u1EF3 t\u1ED3n kho n\u00E0y \u0111\u01B0\u1EE3c t\u1EA3i l\u00EAn tr\u01B0\u1EDBc khi c\u00F3 t\u00EDnh n\u0103ng h\u00E0ng h\u1EC7 s\u1ED1 1 \u2014 t\u1EA3i l\u1EA1i file t\u1ED3n kho c\u1EE7a k\u1EF3 n\u00E0y (ho\u1EB7c t\u1EA3i k\u1EF3 m\u1EDBi h\u01A1n) \u0111\u1EC3 xem.")
+                : React.createElement(React.Fragment, null, [
+                    (current.heSo1Products.length === 0) && React.createElement("div", { key: "e0", style: { color: COLORS.inkSoft, fontSize: 13, marginBottom: 16 } }, "Ch\u01B0a c\u00F3 m\u00E3 t\u1ED3n kho n\u00E0o kh\u1EDBp v\u1EDBi danh s\u00E1ch h\u00E0ng h\u1EC7 s\u1ED1 1 \u0111\u00E3 khai b\u00E1o (xem tab Danh m\u1EE5c h\u00E0ng h\u00F3a \u2192 H\u00E0ng h\u1EC7 s\u1ED1)."),
+                    React.createElement("div", { key: "kpis", style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 } }, [
+                        React.createElement(KpiCard, { key: "sku", label: "S\u1ED1 m\u00E3 h\u1EC7 s\u1ED1 1 \u0111ang t\u1ED3n", value: fmtNum(current.heSo1Products.length) }),
+                        React.createElement(KpiCard, { key: "val", label: "T\u1ED5ng gi\u00E1 tr\u1ECB t\u1ED3n h\u1EC7 s\u1ED1 1", value: fmtVND(current.heSo1Products.reduce((a, p) => a + p.value, 0)) }),
+                        React.createElement(KpiCard, { key: "warn", label: "S\u1ED1 m\u00E3 \u0111ang c\u1EA3nh b\u00E1o", value: fmtNum((heSo1Analysis && heSo1Analysis.warnCount) || 0), tone: (heSo1Analysis && heSo1Analysis.warnCount) > 0 ? "warn" : "good" }),
+                    ]),
+                    React.createElement("div", { key: "group", style: { ...cardStyle, background: COLORS.card, marginBottom: 16 } }, [
+                        React.createElement("div", { key: "t", style: titleStyle }, "T\u1ED3n kho h\u00E0ng h\u1EC7 s\u1ED1 1 theo Nh\u00F3m (DMHH)"),
+                        (!current.heSo1ByGroup || current.heSo1ByGroup.length === 0)
+                            ? React.createElement("div", { key: "e", style: { color: COLORS.inkSoft, fontSize: 13 } }, "Ch\u01B0a c\u00F3 nh\u00F3m n\u00E0o \u2014 c\u1EA7n g\u00E1n Nh\u00F3m cho c\u00E1c m\u00E3 h\u1EC7 s\u1ED1 1 \u1EDF tab Danh m\u1EE5c h\u00E0ng h\u00F3a.")
+                            : React.createElement("table", { key: "tbl", style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } }, [
+                                React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase" } }, ["Nh\u00F3m", "S\u1ED1 m\u00E3", "SL t\u1ED3n", "Gi\u00E1 tr\u1ECB t\u1ED3n"].map((h, i) => React.createElement("th", { key: i, style: { padding: "6px 8px", textAlign: i > 1 ? "right" : "left" } }, h)))),
+                                React.createElement("tbody", { key: "b" }, current.heSo1ByGroup.map((g) => React.createElement("tr", { key: g.nhom, style: { borderTop: `1px solid ${COLORS.line}` } }, [
+                                    React.createElement("td", { key: "n", style: { padding: "8px" } }, g.nhom),
+                                    React.createElement("td", { key: "c", style: { padding: "8px", textAlign: "right" } }, fmtNum(g.skuCount)),
+                                    React.createElement("td", { key: "q", style: { padding: "8px", textAlign: "right" } }, fmtNum(g.qty)),
+                                    React.createElement("td", { key: "v", style: { padding: "8px", textAlign: "right", fontWeight: 600 } }, fmtVND(g.value)),
+                                ]))),
+                            ]),
+                    ]),
+                    React.createElement("div", { key: "warn", style: { ...cardStyle, background: COLORS.card } }, [
+                        React.createElement("div", { key: "top", style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 12 } }, [
+                            React.createElement("div", { key: "t", style: { fontSize: 13, fontWeight: 600 } }, "C\u1EA3nh b\u00E1o t\u1ED3n kho h\u1EC7 s\u1ED1 1 so v\u1EDBi t\u1ED1c \u0111\u1ED9 b\u00E1n"),
+                            React.createElement("div", { key: "ctl", style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
+                                React.createElement("select", { key: "w", value: velocityWindow, onChange: (e) => setVelocityWindow(Number(e.target.value)), style: selectStyle }, [
+                                    React.createElement("option", { key: 14, value: 14 }, "T\u1ED1c \u0111\u1ED9 b\u00E1n 14 ng\u00E0y g\u1EA7n nh\u1EA5t"),
+                                    React.createElement("option", { key: 30, value: 30 }, "T\u1ED1c \u0111\u1ED9 b\u00E1n 30 ng\u00E0y g\u1EA7n nh\u1EA5t"),
+                                    React.createElement("option", { key: 60, value: 60 }, "T\u1ED1c \u0111\u1ED9 b\u00E1n 60 ng\u00E0y g\u1EA7n nh\u1EA5t"),
+                                ]),
+                                React.createElement("label", { key: "l", style: { display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: COLORS.inkSoft } }, [
+                                    React.createElement("input", { key: "i", type: "checkbox", checked: showNormalHeSo1, onChange: (e) => setShowNormalHeSo1(e.target.checked) }),
+                                    "Hi\u1EC7n c\u1EA3 m\u00E3 b\u00ECnh th\u01B0\u1EDDng",
+                                ]),
+                            ]),
+                        ]),
+                        !heSo1Analysis || !heSo1Analysis.hasSalesData
+                            ? React.createElement("div", { style: { color: COLORS.inkSoft, fontSize: 13 } }, "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u doanh thu theo M\u00E3 s\u1EA3n ph\u1EA9m \u0111\u1EC3 t\u00EDnh t\u1ED1c \u0111\u1ED9 b\u00E1n \u2014 t\u1EA3i file doanh thu c\u00F3 c\u1ED9t M\u00E3 s\u1EA3n ph\u1EA9m \u1EDF tab Doanh thu.")
+                            : (() => {
+                                const rows = showNormalHeSo1 ? heSo1Analysis.rows : heSo1Analysis.rows.filter((r) => r.status !== "normal");
+                                return rows.length === 0
+                                    ? React.createElement("div", { style: { color: COLORS.inkSoft, fontSize: 13 } }, "Kh\u00F4ng c\u00F3 m\u00E3 h\u1EC7 s\u1ED1 1 n\u00E0o \u0111ang c\u1EA3nh b\u00E1o.")
+                                    : React.createElement("div", { style: { maxHeight: 420, overflowY: "auto" } }, React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } }, [
+                                        React.createElement("thead", { key: "h" }, React.createElement("tr", { style: { textAlign: "left", color: COLORS.inkSoft, fontSize: 11, textTransform: "uppercase", position: "sticky", top: 0, background: COLORS.card } }, ["M\u00E3 SP", "T\u00EAn s\u1EA3n ph\u1EA9m", "Nh\u00F3m", "SL t\u1ED3n", `SL b\u00E1n TB/ng\u00E0y (${velocityWindow}n)`, "S\u1ED1 ng\u00E0y \u0111\u1EE7 b\u00E1n", "C\u1EA3nh b\u00E1o"].map((h, i) => React.createElement("th", { key: i, style: { padding: "6px 8px", textAlign: (i >= 3 && i <= 5) ? "right" : "left" } }, h)))),
+                                        React.createElement("tbody", { key: "b" }, rows.map((r) => React.createElement("tr", { key: r.code, style: { borderTop: `1px solid ${COLORS.line}`, background: r.tone === "warn" ? COLORS.amberSoft : "transparent" } }, [
+                                            React.createElement("td", { key: "c", style: { padding: "8px", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 } }, r.code),
+                                            React.createElement("td", { key: "n", style: { padding: "8px" } }, r.name),
+                                            React.createElement("td", { key: "g", style: { padding: "8px", color: COLORS.inkSoft } }, r.nhom),
+                                            React.createElement("td", { key: "q", style: { padding: "8px", textAlign: "right" } }, fmtNum(r.qty)),
+                                            React.createElement("td", { key: "a", style: { padding: "8px", textAlign: "right" } }, r.avgPerDay != null ? r.avgPerDay.toFixed(2) : "\u2014"),
+                                            React.createElement("td", { key: "d", style: { padding: "8px", textAlign: "right" } }, r.daysCover != null ? Math.round(r.daysCover) : "\u2014"),
+                                            React.createElement("td", { key: "s", style: { padding: "8px", fontWeight: r.tone === "warn" ? 600 : 400, color: r.tone === "warn" ? COLORS.clay : COLORS.inkSoft } }, r.statusLabel),
+                                        ]))),
+                                    ]));
+                            })(),
+                    ]),
+                ]))))));
 }
 function RevenueView({ shopConfig }) {
     var _a, _b;
@@ -2269,7 +2491,7 @@ function RevenueView({ shopConfig }) {
                         React.createElement("div", { style: { fontSize: 13, fontWeight: 600, marginBottom: 6 } }, "T\u1EF7 l\u1EC7 ho\u00E0n th\u00E0nh target theo c\u1EEDa h\u00E0ng"),
                         React.createElement("div", { style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 12 } }, "T\u1EA3i file \"K\u1EBF ho\u1EA1ch kinh doanh theo th\u00E1ng\" (gi\u1ED1ng m\u1EABu, c\u00F3 d\u00F2ng \"TH\u00C1NG X/YYYY\" v\u00E0 c\u1ED9t T\u00EAn nh\u00E0 thu\u1ED1c/DS KH/H\u00E0ng h\u1EC7 s\u1ED1/TBB/Bill) \u2014 m\u1ED7i l\u1EA7n t\u1EA3i l\u00E0 target cho \u0111\u00FAng th\u00E1ng \u0111\u00F3. H\u1EC7 th\u1ED1ng t\u1EF1 kh\u1EDBp v\u1EDBi th\u00E1ng c\u1EE7a \"T\u1EEB ng\u00E0y\" \u0111ang xem \u0111\u1EC3 t\u00EDnh % ho\u00E0n th\u00E0nh; c\u00F3 th\u1EC3 ch\u1ECDn tay th\u00E1ng kh\u00E1c b\u00EAn d\u01B0\u1EDBi."),
                         React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 14 } },
-                            React.createElement(UploadStager, { onConfirm: async (file) => handleTargetFile(file), buttonLabel: targetUploading ? "Đang xử lý..." : "Tải file target lên", dropzoneTitle: "K\u00E9o th\u1EA3 file target v\u00E0o \u0111\u00E2y", dropzoneHint: "File c\u1EA7n c\u00F3 d\u00F2ng ghi th\u00E1ng v\u00E0 c\u1ED9t T\u00EAn nh\u00E0 thu\u1ED1c.", showDropzone: false, showLabelInput: false }),
+                            React.createElement(UploadStager, { onConfirm: async (file) => handleTargetFile(file), buttonLabel: targetUploading ? "Đang xử lý..." : "Tải file target lên", dropzoneTitle: "Kéo thả file target vào đây", dropzoneHint: 'File cần có 3 cột: "Mã nhà thuốc", "Loại chỉ tiêu" (Doanh số tổng / Doanh số hệ số) và cột "Tháng X" ghi giá trị.', showDropzone: false, showLabelInput: false }),
                             availableTargetMonths.length > 0 && (React.createElement(React.Fragment, null,
                                 React.createElement("span", { style: { fontSize: 13, color: COLORS.inkSoft } }, "Th\u00E1ng \u0111ang so s\u00E1nh:"),
                                 React.createElement("select", { value: targetMonth, onChange: (e) => setTargetMonthOverride(e.target.value), style: selectStyle }, availableTargetMonths.map((m) => React.createElement("option", { key: m, value: m }, m)))))),
@@ -4594,6 +4816,23 @@ function DataManagementView() {
     ]);
 }
 // ---------- Kế hoạch tuần ----------
+function uid(){ return "id" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+// Ô textarea tự co giãn chiều cao theo nội dung gõ vào — dùng cho các ô nội dung/target
+// trong kế hoạch tuần để không bị cắt chữ hay để trống thừa khi nội dung ngắn/dài khác nhau.
+function AutoGrowTextarea({ className, value, onChange, ...rest }) {
+    const ref = useRef(null);
+    useEffect(() => {
+        const el = ref.current;
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = el.scrollHeight + "px";
+    }, [value]);
+    return React.createElement("textarea", {
+        ...rest, ref, rows: 1, value, onChange,
+        className: (className || "") + " autoGrow",
+        onInput: (e) => { e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; },
+    });
+}
 function toISODateLocal(d) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
@@ -4621,9 +4860,30 @@ function fmtDMY(iso) {
     const [y, m, d] = iso.split("-");
     return `${d}/${m}`;
 }
+// Mỗi mục (Doanh thu/Nhân sự/Hàng hoá/...) giờ là 1 danh sách nhiều dòng công việc,
+// mỗi dòng có Nội dung / Target / Người thực hiện / Deadline / Kết quả — giống format
+// bên app Nhân sự (Ops), thay vì chỉ 1 ô ghi chú + 1 ô chỉ tiêu như trước.
+function weeklyPlanEmptyRow(extra) {
+    return { id: uid(), noiDung: "", target: "", nguoiThucHien: "", deadline: "", ketQua: "", ...extra };
+}
+function weeklyPlanDefaultData() {
+    const o = {};
+    WEEKPLAN_SECTIONS.forEach((s) => { o[s.key] = [weeklyPlanEmptyRow()]; });
+    return o;
+}
+// Chuẩn hoá dữ liệu 1 mục về dạng mảng dòng — để vẫn đọc được các tuần đã lưu theo
+// định dạng cũ (chỉ có 2 ô "ghiChu"/"chiTieu") từ trước khi đổi sang định dạng nhiều dòng này.
+function normalizeSectionRows(sectionData) {
+    if (Array.isArray(sectionData)) return sectionData;
+    if (sectionData && (sectionData.ghiChu || sectionData.chiTieu)) {
+        return [weeklyPlanEmptyRow({ noiDung: sectionData.ghiChu || "", target: sectionData.chiTieu || "" })];
+    }
+    return [];
+}
 function weekPlanHasContent(plan) {
     if (!plan) return false;
-    return Object.values(plan).some((s) => s && (s.ghiChu || s.chiTieu || s.baoCao));
+    return Object.values(plan).some((sectionData) =>
+        normalizeSectionRows(sectionData).some((r) => r.noiDung || r.target || r.nguoiThucHien || r.deadline || r.ketQua));
 }
 const WEEKPLAN_SECTIONS = [
     { key: "doanhThu", label: "💰 Doanh thu", color: COLORS.amber },
@@ -4656,7 +4916,12 @@ function WeeklyPlanView({ shopConfig }) {
     useEffect(() => { const u = subscribeInventory(setInventory); return u; }, []);
     useEffect(() => { const u = subscribeCustomers(setCustomers); return u; }, []);
     useEffect(() => {
-        setDraft(plan || {});
+        const base = {};
+        WEEKPLAN_SECTIONS.forEach((s) => {
+            const rows = normalizeSectionRows(plan && plan[s.key]);
+            base[s.key] = rows.length > 0 ? rows : [weeklyPlanEmptyRow()];
+        });
+        setDraft(base);
         setSavedAt(null);
         setAiSuggestion(null);
         setAiError(null);
@@ -4714,8 +4979,14 @@ function WeeklyPlanView({ shopConfig }) {
         setAiLoading(false);
     }
 
-    function updateField(section, field, value) {
-        setDraft((d) => ({ ...d, [section]: { ...(d[section] || {}), [field]: value } }));
+    function updateRow(sectionKey, rowId, field, value) {
+        setDraft((d) => ({ ...d, [sectionKey]: (d[sectionKey] || []).map((r) => (r.id === rowId ? { ...r, [field]: value } : r)) }));
+    }
+    function addRow(sectionKey) {
+        setDraft((d) => ({ ...d, [sectionKey]: [...(d[sectionKey] || []), weeklyPlanEmptyRow()] }));
+    }
+    function removeRow(sectionKey, rowId) {
+        setDraft((d) => ({ ...d, [sectionKey]: (d[sectionKey] || []).filter((r) => r.id !== rowId) }));
     }
     async function handleSave() {
         setSaving(true);
@@ -4751,22 +5022,51 @@ function WeeklyPlanView({ shopConfig }) {
             )),
     ]);
 
-    function prevText(section, field) {
-        const v = ((prevPlan || {})[section] || {})[field];
-        return v ? v : "(không có ghi chú)";
+    // Tóm tắt các dòng đã cam kết tuần trước cho 1 mục — dùng làm tham chiếu bên dưới mỗi mục.
+    function prevRowsSummary(sectionKey) {
+        const rows = normalizeSectionRows(prevPlan && prevPlan[sectionKey]).filter((r) => r.noiDung || r.target);
+        if (rows.length === 0) return "(không có ghi chú)";
+        return rows.map((r) => (r.target ? `${r.noiDung || "—"} (chỉ tiêu: ${r.target})` : (r.noiDung || "—"))).join("; ");
     }
     const sectionCards = WEEKPLAN_SECTIONS.map((s) => {
-        return React.createElement("div", { key: s.key, style: { ...cardStyle, background: COLORS.card, marginBottom: 16, borderLeft: `4px solid ${s.color}` } }, [
-            React.createElement("div", { key: "t", style: { ...titleStyle, marginBottom: 12 } }, s.label),
-            React.createElement("div", { key: "grid", style: { display: "flex", gap: 14, flexWrap: "wrap" } }, [
-                ["ghiChu", "Kế hoạch tuần này"], ["chiTieu", "Chỉ tiêu / mục tiêu tuần này"],
-            ].map(([field, labelText]) => React.createElement("div", { key: field, style: { flex: "1 1 260px" } }, [
-                React.createElement("label", { key: "l", style: { fontSize: 12, fontWeight: 600, marginBottom: 5, display: "block" } }, labelText),
-                React.createElement("textarea", { key: "i", rows: 4, value: ((draft[s.key] || {})[field]) || "", onChange: (e) => updateField(s.key, field, e.target.value), style: { width: "100%", padding: "9px 10px", border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 13.5, fontFamily: "inherit", marginBottom: 8 } }),
-                React.createElement("div", { key: "prev", style: { fontSize: 11.5, color: COLORS.inkSoft, background: COLORS.paper, borderRadius: 7, padding: "7px 9px" } }, [
-                    React.createElement("b", { key: "b" }, "Tuần trước: "), prevText(s.key, field),
+        const rows = draft[s.key] || [];
+        return React.createElement("div", { key: s.key, className: "card weeklyCatBlock", style: { marginBottom: 16, borderLeft: `4px solid ${s.color}` } }, [
+            React.createElement("div", { key: "t", className: "weeklyCatTitle" }, [
+                React.createElement("span", { key: "d", className: "dot", style: { background: s.color } }),
+                s.label,
+            ]),
+            ...rows.map((r) => React.createElement("div", { key: r.id, className: "weeklyRow" }, [
+                rows.length > 1 && React.createElement("div", { key: "rm", style: { textAlign: "right" } },
+                    React.createElement("button", { type: "button", className: "weeklyRowRemove", onClick: () => removeRow(s.key, r.id) }, "✕ Xoá dòng")),
+                React.createElement("div", { key: "grid", className: "weeklyRowGrid" }, [
+                    React.createElement("div", { key: "nd" }, [
+                        React.createElement("span", { key: "l", className: "weeklyRowLbl" }, "Nội dung kế hoạch"),
+                        React.createElement(AutoGrowTextarea, { key: "i", className: "taskResultInput", value: r.noiDung, onChange: (e) => updateRow(s.key, r.id, "noiDung", e.target.value), placeholder: "Việc cần làm / chỉ tiêu tuần này..." }),
+                    ]),
+                    React.createElement("div", { key: "nth", style: { flex: "0 1 190px" } }, [
+                        React.createElement("span", { key: "l", className: "weeklyRowLbl" }, "Người thực hiện"),
+                        React.createElement("input", { key: "i", className: "taskResultInput", value: r.nguoiThucHien, onChange: (e) => updateRow(s.key, r.id, "nguoiThucHien", e.target.value), placeholder: "Tên người phụ trách..." }),
+                    ]),
+                    React.createElement("div", { key: "dl", style: { flex: "0 1 150px" } }, [
+                        React.createElement("span", { key: "l", className: "weeklyRowLbl" }, "Deadline"),
+                        React.createElement("input", { key: "i", type: "date", className: "taskResultInput", value: r.deadline || "", onChange: (e) => updateRow(s.key, r.id, "deadline", e.target.value) }),
+                    ]),
+                    React.createElement("div", { key: "tg", style: { flex: "0 1 190px" } }, [
+                        React.createElement("span", { key: "l", className: "weeklyRowLbl" }, "Target cam kết"),
+                        React.createElement(AutoGrowTextarea, { key: "i", className: "taskResultInput", value: r.target, onChange: (e) => updateRow(s.key, r.id, "target", e.target.value), placeholder: "VD: 50 triệu doanh số..." }),
+                    ]),
+                    React.createElement("div", { key: "kq", style: { flex: "1 1 100%" } }, [
+                        React.createElement("span", { key: "l", className: "weeklyRowLbl" }, "Kết quả thực hiện"),
+                        React.createElement(AutoGrowTextarea, { key: "i", className: "taskResultInput", value: r.ketQua, onChange: (e) => updateRow(s.key, r.id, "ketQua", e.target.value), placeholder: "Đã làm được gì, số liệu thực tế..." }),
+                    ]),
                 ]),
-            ]))),
+            ])),
+            React.createElement("div", { key: "add", style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginTop: 4 } }, [
+                React.createElement("button", { key: "b", type: "button", className: "btn", onClick: () => addRow(s.key) }, "+ Thêm dòng"),
+                React.createElement("div", { key: "prev", style: { fontSize: 11.5, color: COLORS.inkSoft, background: COLORS.paper, borderRadius: 7, padding: "7px 9px", flex: "1 1 260px" } }, [
+                    React.createElement("b", { key: "b2" }, "Tuần trước: "), prevRowsSummary(s.key),
+                ]),
+            ]),
         ]);
     });
 
