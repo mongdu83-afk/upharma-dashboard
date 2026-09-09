@@ -1158,9 +1158,9 @@ function subscribeInventory(cb) {
         cb(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
 }
-async function saveInventorySnapshot(label, parsed, periodDate) {
+async function saveInventorySnapshot(label, parsed, periodDate, extra) {
     await db.collection("inventorySnapshots").add({
-        label, periodDate: periodDate || todayISO(), ...parsed, resolvedKeys: [], uploadedAtTs: firebase.firestore.FieldValue.serverTimestamp(),
+        label, periodDate: periodDate || todayISO(), ...parsed, resolvedKeys: [], uploadedAtTs: firebase.firestore.FieldValue.serverTimestamp(), ...(extra || {}),
     });
 }
 function alertKey(a) { return `${a.shop}__${a.code}__${a.batch}`; }
@@ -1532,6 +1532,8 @@ function InventoryView({ shopConfig }) {
     const [subTab, setSubTab] = useState("period");
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
+    const [apiSyncDate, setApiSyncDate] = useState(todayISO());
+    const [apiSyncing, setApiSyncing] = useState(false);
     useEffect(() => {
         const unsub = subscribeInventory((list) => { setSnapshots(list); if (!selectedId && list.length)
             setSelectedId(list[list.length - 1].id); });
@@ -1551,6 +1553,52 @@ function InventoryView({ shopConfig }) {
         catch (e) {
             setError(e.message || "Không đọc được file.");
             throw e;
+        }
+    }
+    // Đồng bộ tồn kho từ API (upharma.com.vn) cho đúng 1 ngày — dựng file Excel "ảo" từ dữ liệu
+    // Cloud Function đã đồng bộ sẵn (collection externalInventory), đưa qua bộ xử lý sẵn có.
+    // Luôn xoá snapshot API cũ của đúng ngày đó trước, tránh tồn tại nhiều bản trùng gây rối.
+    async function syncInventoryFromApi(dateStr) {
+        if (!dateStr) return;
+        setError(null);
+        setApiSyncing(true);
+        try {
+            const dup = snapshots.filter((s) => s.apiSyncDate === dateStr);
+            for (const s of dup)
+                await deleteInventorySnapshot(s.id);
+            const snap = await db.collection("externalInventory").where("syncDate", "==", dateStr).get();
+            if (snap.empty) {
+                setError(`Không có dữ liệu tồn kho API nào đã đồng bộ cho ngày ${dateStr}.`);
+                return;
+            }
+            const rows = snap.docs.map((d) => {
+                const r = d.data();
+                return {
+                    "Mã shop": r.shopCode || "",
+                    "Mã sản phẩm": r.ProductID || "",
+                    "Tên sản phẩm": r.ProductName || "",
+                    "Mã lô": r.LotCode || "",
+                    "Số lượng": r.Quantity || 0,
+                    "Đơn vị": r.UnitOfMeasure || "",
+                    "Giá bán": r.UnitPrice || 0,
+                    "Ngày hết hạn": (r.ExpirationDate || "").slice(0, 10),
+                    "Ngày sản xuất": (r.ProductionDate || "").slice(0, 10),
+                };
+            });
+            const ws = XLSX.utils.json_to_sheet(rows);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Data");
+            const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+            const file = new File([wbout], `inventory-api-sync-${dateStr}.xlsx`, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+            const parsed = await parseInventoryFile(file, coefficients, categoryMap);
+            const { categoryUpdates, ...toSave } = parsed;
+            await saveInventorySnapshot(`Đồng bộ API — ${dateStr}`, toSave, dateStr, { apiSource: true, apiSyncDate: dateStr });
+        }
+        catch (e) {
+            setError(e.message || "Đồng bộ tồn kho từ API thất bại.");
+        }
+        finally {
+            setApiSyncing(false);
         }
     }
     const filteredShops = useMemo(() => {
@@ -1688,7 +1736,12 @@ function InventoryView({ shopConfig }) {
                     React.createElement("option", { value: 30 }, "C\u1EADn h\u1EA1n trong 30 ng\u00E0y"),
                     React.createElement("option", { value: 60 }, "C\u1EADn h\u1EA1n trong 60 ng\u00E0y"),
                     React.createElement("option", { value: 90 }, "C\u1EADn h\u1EA1n trong 90 ng\u00E0y")),
-                React.createElement(UploadStager, { onConfirm: handleFile, buttonLabel: "T\u1EA3i l\u00EAn t\u1ED3n kho m\u1EDBi", dropzoneTitle: "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u t\u1ED3n kho", dropzoneHint: 'K\u00E9o th\u1EA3 file t\u1ED3n kho (Excel/CSV) v\u00E0o \u0111\u00E2y, ho\u1EB7c b\u1EA5m "T\u1EA3i l\u00EAn t\u1ED3n kho m\u1EDBi".', showDropzone: !current })),
+                React.createElement(UploadStager, { onConfirm: handleFile, buttonLabel: "T\u1EA3i l\u00EAn t\u1ED3n kho m\u1EDBi", dropzoneTitle: "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u t\u1ED3n kho", dropzoneHint: 'K\u00E9o th\u1EA3 file t\u1ED3n kho (Excel/CSV) v\u00E0o \u0111\u00E2y, ho\u1EB7c b\u1EA5m "T\u1EA3i l\u00EAn t\u1ED3n kho m\u1EDBi".', showDropzone: !current }),
+                React.createElement("div", { key: "apisync", style: { display: "flex", gap: 8, alignItems: "center" } }, [
+                    React.createElement("span", { key: "l", style: { fontSize: 12, color: COLORS.inkSoft } }, "Ho\u1EB7c \u0111\u1ED3ng b\u1ED9 t\u1EEB API cho ng\u00E0y:"),
+                    React.createElement("input", { key: "d", type: "date", value: apiSyncDate, onChange: (e) => setApiSyncDate(e.target.value), style: selectStyle }),
+                    React.createElement("button", { key: "b", type: "button", disabled: apiSyncing, onClick: () => syncInventoryFromApi(apiSyncDate), style: { padding: "7px 14px", borderRadius: 8, border: `1px solid ${COLORS.pine}`, background: COLORS.pine, color: "#fff", fontSize: 13, cursor: apiSyncing ? "default" : "pointer", opacity: apiSyncing ? 0.6 : 1 } }, apiSyncing ? "\u0110ang \u0111\u1ED3ng b\u1ED9..." : "\u0110\u1ED3ng b\u1ED9 t\u1EEB API"),
+                ])),
             error && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginBottom: 20 } }, error),
             current && (React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 24 } },
@@ -1921,7 +1974,8 @@ function RevenueView({ shopConfig }) {
     const [nganhTo, setNganhTo] = useState("");
     const [showFileList, setShowFileList] = useState(false);
     const [deletingId, setDeletingId] = useState(null);
-    const [apiSyncDate, setApiSyncDate] = useState(todayISO());
+    const [apiSyncFromDate, setApiSyncFromDate] = useState(todayISO());
+    const [apiSyncToDate, setApiSyncToDate] = useState(todayISO());
     const [apiSyncing, setApiSyncing] = useState(false);
     useEffect(() => {
         const unsub = subscribePeriods((list) => { setPeriods(list); if (!selectedId && list.length)
@@ -1948,26 +2002,28 @@ function RevenueView({ shopConfig }) {
     // Dữ liệu thô đã được Cloud Function đồng bộ sẵn vào Firestore (collection externalSalesLines)
     // — hàm này chỉ đọc lại, dựng thành 1 file Excel "ảo" trong bộ nhớ, rồi đưa qua ĐÚNG bộ xử lý
     // Excel sẵn có (parseFile + savePeriod) để không phải viết lại logic tính toán.
-    // Luôn xoá kỳ API cũ của đúng ngày đó trước khi tạo kỳ mới, tránh cộng đôi doanh thu nếu bấm
-    // đồng bộ lại nhiều lần cho cùng 1 ngày.
-    async function syncFromApi(dateStr) {
-        if (!dateStr) return;
+    // Luôn xoá kỳ API cũ của đúng khoảng ngày đó trước khi tạo kỳ mới, tránh cộng đôi doanh thu
+    // nếu bấm đồng bộ lại nhiều lần cho cùng 1 khoảng.
+    async function syncFromApi(fromDate, toDate) {
+        if (!fromDate || !toDate) return;
+        if (toDate < fromDate) { setError("Ngày kết thúc phải sau hoặc bằng ngày bắt đầu."); return; }
         setError(null);
         setApiSyncing(true);
         try {
-            const dup = periods.filter((p) => p.apiSyncDate === dateStr);
+            const dup = periods.filter((p) => p.apiSyncFrom === fromDate && p.apiSyncTo === toDate);
             for (const p of dup)
                 await deletePeriod(p.id);
-            const snap = await db.collection("externalSalesLines").where("syncDate", "==", dateStr).get();
+            const snap = await db.collection("externalSalesLines")
+                .where("syncDate", ">=", fromDate).where("syncDate", "<=", toDate).get();
             if (snap.empty) {
-                setError(`Không có dữ liệu API nào đã đồng bộ cho ngày ${dateStr} — kiểm tra lại Cloud Function đồng bộ đã chạy cho ngày này chưa.`);
+                setError(`Không có dữ liệu API nào đã đồng bộ trong khoảng ${fromDate} → ${toDate} — kiểm tra lại Cloud Function đồng bộ đã chạy cho các ngày này chưa.`);
                 return;
             }
             const rows = snap.docs.map((d) => {
                 const r = d.data();
                 return {
                     "Mã cửa hàng": r.shopCode || "",
-                    "Ngày vào sổ": (r.orderDate || "").slice(0, 10) || dateStr,
+                    "Ngày vào sổ": (r.orderDate || "").slice(0, 10) || r.syncDate || fromDate,
                     "Mã đơn": r.headerID || "",
                     "Nhân viên bán hàng": r.salesName || "",
                     "Mã sản phẩm": r.productID || "",
@@ -1976,13 +2032,14 @@ function RevenueView({ shopConfig }) {
                     "Ds điều chỉnh": r.amountIncludingVAT || r.amount || 0,
                 };
             });
+            const rangeLabel = fromDate === toDate ? fromDate : `${fromDate} → ${toDate}`;
             const ws = XLSX.utils.json_to_sheet(rows);
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, "Data");
             const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-            const file = new File([wbout], `api-sync-${dateStr}.xlsx`, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+            const file = new File([wbout], `api-sync-${fromDate}_${toDate}.xlsx`, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
             const parsed = await parseFile(file);
-            await savePeriod(`Đồng bộ API — ${dateStr}`, parsed, dateStr, { apiSource: true, apiSyncDate: dateStr });
+            await savePeriod(`Đồng bộ API — ${rangeLabel}`, parsed, fromDate, { apiSource: true, apiSyncFrom: fromDate, apiSyncTo: toDate });
         }
         catch (e) {
             setError(e.message || "Đồng bộ từ API thất bại.");
@@ -2490,10 +2547,12 @@ function RevenueView({ shopConfig }) {
                     React.createElement("option", null, "T\u1EA5t c\u1EA3"),
                     SEGMENT_OPTIONS.map((s) => React.createElement("option", { key: s }, s))),
                 React.createElement(UploadStager, { onConfirm: handleFile, buttonLabel: "T\u1EA3i l\u00EAn b\u00E1o c\u00E1o m\u1EDBi", dropzoneTitle: "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u", dropzoneHint: 'K\u00E9o th\u1EA3 file Excel/CSV v\u00E0o \u0111\u00E2y, ho\u1EB7c b\u1EA5m "T\u1EA3i l\u00EAn b\u00E1o c\u00E1o m\u1EDBi".', showDropzone: !current }),
-                React.createElement("div", { key: "apisync", style: { display: "flex", gap: 8, alignItems: "center" } }, [
-                    React.createElement("span", { key: "l", style: { fontSize: 12, color: COLORS.inkSoft } }, "Ho\u1EB7c \u0111\u1ED3ng b\u1ED9 t\u1EEB API cho ng\u00E0y:"),
-                    React.createElement("input", { key: "d", type: "date", value: apiSyncDate, onChange: (e) => setApiSyncDate(e.target.value), style: selectStyle }),
-                    React.createElement("button", { key: "b", type: "button", disabled: apiSyncing, onClick: () => syncFromApi(apiSyncDate), style: { padding: "7px 14px", borderRadius: 8, border: `1px solid ${COLORS.pine}`, background: COLORS.pine, color: "#fff", fontSize: 13, cursor: apiSyncing ? "default" : "pointer", opacity: apiSyncing ? 0.6 : 1 } }, apiSyncing ? "\u0110ang \u0111\u1ED3ng b\u1ED9..." : "\u0110\u1ED3ng b\u1ED9 t\u1EEB API"),
+                React.createElement("div", { key: "apisync", style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
+                    React.createElement("span", { key: "l", style: { fontSize: 12, color: COLORS.inkSoft } }, "Ho\u1EB7c \u0111\u1ED3ng b\u1ED9 t\u1EEB API, t\u1EEB ng\u00E0y:"),
+                    React.createElement("input", { key: "d1", type: "date", value: apiSyncFromDate, onChange: (e) => setApiSyncFromDate(e.target.value), style: selectStyle }),
+                    React.createElement("span", { key: "l2", style: { fontSize: 12, color: COLORS.inkSoft } }, "\u0111\u1EBFn ng\u00E0y:"),
+                    React.createElement("input", { key: "d2", type: "date", value: apiSyncToDate, onChange: (e) => setApiSyncToDate(e.target.value), style: selectStyle }),
+                    React.createElement("button", { key: "b", type: "button", disabled: apiSyncing, onClick: () => syncFromApi(apiSyncFromDate, apiSyncToDate), style: { padding: "7px 14px", borderRadius: 8, border: `1px solid ${COLORS.pine}`, background: COLORS.pine, color: "#fff", fontSize: 13, cursor: apiSyncing ? "default" : "pointer", opacity: apiSyncing ? 0.6 : 1 } }, apiSyncing ? "\u0110ang \u0111\u1ED3ng b\u1ED9..." : "\u0110\u1ED3ng b\u1ED9 t\u1EEB API"),
                 ])),
             error && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginBottom: 20 } }, error),
             periods.length > 0 && (React.createElement("div", { style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 20, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
