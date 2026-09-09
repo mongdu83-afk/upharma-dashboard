@@ -1736,7 +1736,7 @@ function InventoryView({ shopConfig }) {
                     React.createElement("option", { value: 30 }, "C\u1EADn h\u1EA1n trong 30 ng\u00E0y"),
                     React.createElement("option", { value: 60 }, "C\u1EADn h\u1EA1n trong 60 ng\u00E0y"),
                     React.createElement("option", { value: 90 }, "C\u1EADn h\u1EA1n trong 90 ng\u00E0y")),
-                React.createElement(UploadStager, { onConfirm: handleFile, buttonLabel: "T\u1EA3i l\u00EAn t\u1ED3n kho m\u1EDBi", dropzoneTitle: "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u t\u1ED3n kho", dropzoneHint: 'K\u00E9o th\u1EA3 file t\u1ED3n kho (Excel/CSV) v\u00E0o \u0111\u00E2y, ho\u1EB7c b\u1EA5m "T\u1EA3i l\u00EAn t\u1ED3n kho m\u1EDBi".', showDropzone: !current }),
+                React.createElement(UploadStager, { onConfirm: handleFile, buttonLabel: "T\u1EA3i l\u00EAn t\u1ED3n kho l\u1ECBch s\u1EED", dropzoneTitle: "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u t\u1ED3n kho", dropzoneHint: "D\u00F9ng khi c\u1EA7n n\u1EA1p t\u1ED3n kho c\u1EE7a NG\u00C0Y TR\u01AF\u1EDAC (API ch\u1EC9 l\u1EA5y \u0111\u01B0\u1EE3c t\u1ED3n kho hi\u1EC7n t\u1EA1i, kh\u00F4ng l\u1EA5y \u0111\u01B0\u1EE3c l\u1ECBch s\u1EED) \u2014 xu\u1EA5t file t\u1EEB h\u1EC7 th\u1ED1ng upharma.com.vn r\u1ED3i t\u1EA3i l\u00EAn \u0111\u00E2y.", showDropzone: false }),
                 React.createElement("div", { key: "apisync", style: { display: "flex", gap: 8, alignItems: "center" } }, [
                     React.createElement("span", { key: "l", style: { fontSize: 12, color: COLORS.inkSoft } }, "Ho\u1EB7c \u0111\u1ED3ng b\u1ED9 t\u1EEB API cho ng\u00E0y:"),
                     React.createElement("input", { key: "d", type: "date", value: apiSyncDate, onChange: (e) => setApiSyncDate(e.target.value), style: selectStyle }),
@@ -1998,48 +1998,87 @@ function RevenueView({ shopConfig }) {
             throw e;
         }
     }
-    // Đồng bộ doanh thu từ API (đơn hàng bán upharma.com.vn) cho đúng 1 ngày cụ thể.
-    // Dữ liệu thô đã được Cloud Function đồng bộ sẵn vào Firestore (collection externalSalesLines)
-    // — hàm này chỉ đọc lại, dựng thành 1 file Excel "ảo" trong bộ nhớ, rồi đưa qua ĐÚNG bộ xử lý
-    // Excel sẵn có (parseFile + savePeriod) để không phải viết lại logic tính toán.
+    // Đồng bộ doanh thu từ API (đơn hàng bán upharma.com.vn) cho 1 khoảng ngày.
+    // Dữ liệu thô đã được Cloud Function đồng bộ sẵn vào Firestore — hàm này chỉ đọc lại, dựng
+    // thành 1 file Excel "ảo" trong bộ nhớ, rồi đưa qua ĐÚNG bộ xử lý Excel sẵn có (parseFile +
+    // savePeriod) để không phải viết lại logic tính toán.
+    // Ưu tiên dùng dữ liệu CHI TIẾT SẢN PHẨM (externalSalesLines) nếu có — cho ra đầy đủ chỉ số
+    // theo ngành hàng/sản phẩm. Nếu chỗ đó trống (vì đã chọn đồng bộ nhanh, chỉ lấy tổng đơn),
+    // tự động dùng TỔNG ĐƠN (externalSalesOrders) thay thế — vẫn ra đúng doanh thu tổng theo
+    // ngày/cửa hàng/nhân viên, chỉ không tách được theo sản phẩm/ngành hàng.
     // Luôn xoá kỳ API cũ của đúng khoảng ngày đó trước khi tạo kỳ mới, tránh cộng đôi doanh thu
     // nếu bấm đồng bộ lại nhiều lần cho cùng 1 khoảng.
+    const CLOUD_FUNCTIONS_BASE = "https://asia-southeast1-upharma-176d5.cloudfunctions.net";
     async function syncFromApi(fromDate, toDate) {
         if (!fromDate || !toDate) return;
         if (toDate < fromDate) { setError("Ngày kết thúc phải sau hoặc bằng ngày bắt đầu."); return; }
         setError(null);
         setApiSyncing(true);
         try {
+            // Tự chọn mức độ theo đúng tab đang xem — "Theo ngành" cần chi tiết sản phẩm nên
+            // gọi bản đầy đủ (chậm hơn); các tab còn lại chỉ cần tổng nên gọi bản nhanh.
+            const needsDetail = subTab === "nganh";
+            const endpoint = needsDetail
+                ? `${CLOUD_FUNCTIONS_BASE}/syncSalesOrdersRange?from=${fromDate}&to=${toDate}`
+                : `${CLOUD_FUNCTIONS_BASE}/syncSalesOrdersHeadersOnlyRange?from=${fromDate}&to=${toDate}`;
+            const triggerResp = await fetch(endpoint);
+            const triggerData = await triggerResp.json();
+            if (!triggerData.ok) {
+                setError("Gọi API đồng bộ thất bại: " + (triggerData.error || "không rõ nguyên nhân"));
+                return;
+            }
             const dup = periods.filter((p) => p.apiSyncFrom === fromDate && p.apiSyncTo === toDate);
             for (const p of dup)
                 await deletePeriod(p.id);
-            const snap = await db.collection("externalSalesLines")
+            let rows = [];
+            let usedDetail = false;
+            const lineSnap = await db.collection("externalSalesLines")
                 .where("syncDate", ">=", fromDate).where("syncDate", "<=", toDate).get();
-            if (snap.empty) {
+            if (!lineSnap.empty) {
+                usedDetail = true;
+                rows = lineSnap.docs.map((d) => {
+                    const r = d.data();
+                    return {
+                        "Mã cửa hàng": r.shopCode || "",
+                        "Ngày vào sổ": (r.orderDate || "").slice(0, 10) || r.syncDate || fromDate,
+                        "Mã đơn": r.headerID || "",
+                        "Nhân viên bán hàng": r.salesName || "",
+                        "Mã sản phẩm": r.productID || "",
+                        "Tên sản phẩm": r.productName || "",
+                        "Số lượng": r.quantity || 0,
+                        "Ds điều chỉnh": r.amountIncludingVAT || r.amount || 0,
+                    };
+                });
+            } else {
+                // Không có chi tiết sản phẩm — dùng tổng đơn thay thế (đồng bộ kiểu nhanh).
+                const headerSnap = await db.collection("externalSalesOrders")
+                    .where("syncDate", ">=", fromDate).where("syncDate", "<=", toDate).get();
+                if (!headerSnap.empty) {
+                    rows = headerSnap.docs.map((d) => {
+                        const r = d.data();
+                        return {
+                            "Mã cửa hàng": r.shopCode || "",
+                            "Ngày vào sổ": (r.OrderDate || "").slice(0, 10) || r.syncDate || fromDate,
+                            "Mã đơn": r.HeaderID || "",
+                            "Nhân viên bán hàng": r.SalesName || "",
+                            "Ds điều chỉnh": r.AmountIncludingVAT || r.CustomerPay || 0,
+                        };
+                    });
+                }
+            }
+            if (rows.length === 0) {
                 setError(`Không có dữ liệu API nào đã đồng bộ trong khoảng ${fromDate} → ${toDate} — kiểm tra lại Cloud Function đồng bộ đã chạy cho các ngày này chưa.`);
                 return;
             }
-            const rows = snap.docs.map((d) => {
-                const r = d.data();
-                return {
-                    "Mã cửa hàng": r.shopCode || "",
-                    "Ngày vào sổ": (r.orderDate || "").slice(0, 10) || r.syncDate || fromDate,
-                    "Mã đơn": r.headerID || "",
-                    "Nhân viên bán hàng": r.salesName || "",
-                    "Mã sản phẩm": r.productID || "",
-                    "Tên sản phẩm": r.productName || "",
-                    "Số lượng": r.quantity || 0,
-                    "Ds điều chỉnh": r.amountIncludingVAT || r.amount || 0,
-                };
-            });
             const rangeLabel = fromDate === toDate ? fromDate : `${fromDate} → ${toDate}`;
+            const labelSuffix = usedDetail ? "" : " (chỉ tổng đơn, không có chi tiết sản phẩm)";
             const ws = XLSX.utils.json_to_sheet(rows);
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, "Data");
             const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
             const file = new File([wbout], `api-sync-${fromDate}_${toDate}.xlsx`, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
             const parsed = await parseFile(file);
-            await savePeriod(`Đồng bộ API — ${rangeLabel}`, parsed, fromDate, { apiSource: true, apiSyncFrom: fromDate, apiSyncTo: toDate });
+            await savePeriod(`Đồng bộ API — ${rangeLabel}${labelSuffix}`, parsed, fromDate, { apiSource: true, apiSyncFrom: fromDate, apiSyncTo: toDate });
         }
         catch (e) {
             setError(e.message || "Đồng bộ từ API thất bại.");
@@ -2528,6 +2567,13 @@ function RevenueView({ shopConfig }) {
                 background: subTab === t.id ? COLORS.pineSoft : "transparent", color: subTab === t.id ? COLORS.pine : COLORS.inkSoft,
                 fontSize: 13, fontWeight: subTab === t.id ? 600 : 400,
             } }, t.label)))),
+        React.createElement("div", { key: "apisync", style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 20 } }, [
+            React.createElement("span", { key: "l", style: { fontSize: 12, color: COLORS.inkSoft } }, subTab === "nganh" ? "Đồng bộ từ API (đầy đủ, có sản phẩm/ngành hàng), từ ngày:" : "Đồng bộ từ API (nhanh, chỉ tổng đơn), từ ngày:"),
+            React.createElement("input", { key: "d1", type: "date", value: apiSyncFromDate, onChange: (e) => setApiSyncFromDate(e.target.value), style: selectStyle }),
+            React.createElement("span", { key: "l2", style: { fontSize: 12, color: COLORS.inkSoft } }, "đến ngày:"),
+            React.createElement("input", { key: "d2", type: "date", value: apiSyncToDate, onChange: (e) => setApiSyncToDate(e.target.value), style: selectStyle }),
+            React.createElement("button", { key: "b", type: "button", disabled: apiSyncing, onClick: () => syncFromApi(apiSyncFromDate, apiSyncToDate), style: { padding: "7px 14px", borderRadius: 8, border: `1px solid ${COLORS.pine}`, background: COLORS.pine, color: "#fff", fontSize: 13, cursor: apiSyncing ? "default" : "pointer", opacity: apiSyncing ? 0.6 : 1 } }, apiSyncing ? "Đang đồng bộ..." : "Đồng bộ từ API"),
+        ]),
         subTab === "period" && (React.createElement(React.Fragment, null,
             React.createElement("div", { style: { display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 24 } },
                 viewMode === "range" && (React.createElement(React.Fragment, null,
@@ -2545,15 +2591,7 @@ function RevenueView({ shopConfig }) {
                     React.createElement("span", { style: { fontSize: 12, color: COLORS.inkSoft } }, "T\u00EDnh tr\u00EAn to\u00E0n b\u1ED9 d\u1EEF li\u1EC7u doanh thu \u0111\u00E3 c\u00F3, g\u1ED9p theo Ng\u00E0y v\u00E0o s\u1ED5 \u2014 kh\u00F4ng ph\u1EE5 thu\u1ED9c file n\u00E0o \u0111\u01B0\u1EE3c t\u1EA3i l\u00EAn khi n\u00E0o."))),
                 React.createElement("select", { value: segmentFilter, onChange: (e) => setSegmentFilter(e.target.value), style: selectStyle },
                     React.createElement("option", null, "T\u1EA5t c\u1EA3"),
-                    SEGMENT_OPTIONS.map((s) => React.createElement("option", { key: s }, s))),
-                React.createElement(UploadStager, { onConfirm: handleFile, buttonLabel: "T\u1EA3i l\u00EAn b\u00E1o c\u00E1o m\u1EDBi", dropzoneTitle: "Ch\u01B0a c\u00F3 d\u1EEF li\u1EC7u", dropzoneHint: 'K\u00E9o th\u1EA3 file Excel/CSV v\u00E0o \u0111\u00E2y, ho\u1EB7c b\u1EA5m "T\u1EA3i l\u00EAn b\u00E1o c\u00E1o m\u1EDBi".', showDropzone: !current }),
-                React.createElement("div", { key: "apisync", style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
-                    React.createElement("span", { key: "l", style: { fontSize: 12, color: COLORS.inkSoft } }, "Ho\u1EB7c \u0111\u1ED3ng b\u1ED9 t\u1EEB API, t\u1EEB ng\u00E0y:"),
-                    React.createElement("input", { key: "d1", type: "date", value: apiSyncFromDate, onChange: (e) => setApiSyncFromDate(e.target.value), style: selectStyle }),
-                    React.createElement("span", { key: "l2", style: { fontSize: 12, color: COLORS.inkSoft } }, "\u0111\u1EBFn ng\u00E0y:"),
-                    React.createElement("input", { key: "d2", type: "date", value: apiSyncToDate, onChange: (e) => setApiSyncToDate(e.target.value), style: selectStyle }),
-                    React.createElement("button", { key: "b", type: "button", disabled: apiSyncing, onClick: () => syncFromApi(apiSyncFromDate, apiSyncToDate), style: { padding: "7px 14px", borderRadius: 8, border: `1px solid ${COLORS.pine}`, background: COLORS.pine, color: "#fff", fontSize: 13, cursor: apiSyncing ? "default" : "pointer", opacity: apiSyncing ? 0.6 : 1 } }, apiSyncing ? "\u0110ang \u0111\u1ED3ng b\u1ED9..." : "\u0110\u1ED3ng b\u1ED9 t\u1EEB API"),
-                ])),
+                    SEGMENT_OPTIONS.map((s) => React.createElement("option", { key: s }, s)))),
             error && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginBottom: 20 } }, error),
             periods.length > 0 && (React.createElement("div", { style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 20, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
                 `\u0110ang l\u01B0u ${periods.length} k\u1EF3 d\u1EEF li\u1EC7u \u2014 t\u1ED5ng ${fmtNum(periods.reduce((a, p) => { var _a; return a + (((_a = p.meta) === null || _a === void 0 ? void 0 : _a.rowCount) || 0); }, 0))} d\u00F2ng. K\u1EF3 c\u00E0ng nhi\u1EC1u, app c\u00E0ng ch\u1EADm t\u1EA3i \u2014 n\u00EAn xo\u00E1 b\u1EDBt k\u1EF3 c\u0169/tr\u00F9ng kh\u00F4ng c\u00F2n d\u00F9ng.`,
