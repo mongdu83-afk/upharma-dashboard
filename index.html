@@ -2009,6 +2009,36 @@ function RevenueView({ shopConfig }) {
     // Luôn xoá kỳ API cũ của đúng khoảng ngày đó trước khi tạo kỳ mới, tránh cộng đôi doanh thu
     // nếu bấm đồng bộ lại nhiều lần cho cùng 1 khoảng.
     const CLOUD_FUNCTIONS_BASE = "https://asia-southeast1-upharma-176d5.cloudfunctions.net";
+    // Dọn tự động các kỳ "Đồng bộ API" bị trùng/chồng lấn — chỉ giữ lại đúng 1 kỳ (kỳ có nhiều
+    // dòng dữ liệu nhất, tức là kỳ bao quát đầy đủ nhất), xoá hết các kỳ API còn lại. Dùng khi
+    // trót đồng bộ nhiều lần cho các khoảng ngày chồng nhau, gây cộng đôi doanh thu.
+    const [cleaningApiPeriods, setCleaningApiPeriods] = useState(false);
+    async function cleanupApiPeriods() {
+        const apiPeriods = periods.filter((p) => (p.label || "").startsWith("\u0110\u1ED3ng b\u1ED9 API"));
+        if (apiPeriods.length <= 1) {
+            setError("Ch\u1EC9 c\u00F3 " + apiPeriods.length + " k\u1EF3 API \u2014 kh\u00F4ng c\u00F3 g\u00EC \u0111\u1EC3 d\u1ECDn.");
+            return;
+        }
+        if (!window.confirm(`T\u00ECm th\u1EA5y ${apiPeriods.length} k\u1EF3 "\u0110\u1ED3ng b\u1ED9 API" \u2014 s\u1EBD ch\u1EC9 gi\u1EEF l\u1EA1i \u0111\u00FAng 1 k\u1EF3 c\u00F3 nhi\u1EC1u d\u00F2ng d\u1EEF li\u1EC7u nh\u1EA5t, xo\u00E1 h\u1EBFt c\u00E1c k\u1EF3 c\u00F2n l\u1EA1i. Ti\u1EBFp t\u1EE5c?`))
+            return;
+        setCleaningApiPeriods(true);
+        try {
+            const sorted = [...apiPeriods].sort((a, b) => (((b.meta && b.meta.rowCount) || 0)) - (((a.meta && a.meta.rowCount) || 0)));
+            const keep = sorted[0];
+            const toDelete = sorted.slice(1);
+            for (const p of toDelete)
+                await deletePeriod(p.id);
+            setError(null);
+            window.alert(`\u0110\u00E3 xo\u00E1 ${toDelete.length} k\u1EF3 tr\u00F9ng, gi\u1EEF l\u1EA1i k\u1EF3 "${keep.label}" (${fmtNum((keep.meta && keep.meta.rowCount) || 0)} d\u00F2ng).`);
+        }
+        catch (e) {
+            setError(e.message || "D\u1ECDn k\u1EF3 tr\u00F9ng th\u1EA5t b\u1EA1i.");
+        }
+        finally {
+            setCleaningApiPeriods(false);
+        }
+    }
+
     async function syncFromApi(fromDate, toDate) {
         if (!fromDate || !toDate) return;
         if (toDate < fromDate) { setError("Ngày kết thúc phải sau hoặc bằng ngày bắt đầu."); return; }
@@ -2027,7 +2057,10 @@ function RevenueView({ shopConfig }) {
                 setError("Gọi API đồng bộ thất bại: " + (triggerData.error || "không rõ nguyên nhân"));
                 return;
             }
-            const dup = periods.filter((p) => p.apiSyncFrom === fromDate && p.apiSyncTo === toDate);
+            // Xoá TẤT CẢ kỳ API cũ có khoảng ngày CHỒNG LẤN với khoảng mới (không chỉ khớp
+            // chính xác) — tránh trường hợp trước đó lỡ đồng bộ 1 ngày lẻ, giờ đồng bộ cả
+            // khoảng bao gồm ngày đó, mà 2 kỳ cùng tồn tại gây cộng đôi doanh thu.
+            const dup = periods.filter((p) => p.apiSource && p.apiSyncFrom && p.apiSyncTo && !(p.apiSyncTo < fromDate || p.apiSyncFrom > toDate));
             for (const p of dup)
                 await deletePeriod(p.id);
             let rows = [];
@@ -2595,7 +2628,8 @@ function RevenueView({ shopConfig }) {
             error && React.createElement("div", { style: { background: COLORS.claySoft, color: COLORS.clay, padding: "10px 14px", borderRadius: 8, fontSize: 13, marginBottom: 20 } }, error),
             periods.length > 0 && (React.createElement("div", { style: { fontSize: 12, color: COLORS.inkSoft, marginBottom: 20, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
                 `\u0110ang l\u01B0u ${periods.length} k\u1EF3 d\u1EEF li\u1EC7u \u2014 t\u1ED5ng ${fmtNum(periods.reduce((a, p) => { var _a; return a + (((_a = p.meta) === null || _a === void 0 ? void 0 : _a.rowCount) || 0); }, 0))} d\u00F2ng. K\u1EF3 c\u00E0ng nhi\u1EC1u, app c\u00E0ng ch\u1EADm t\u1EA3i \u2014 n\u00EAn xo\u00E1 b\u1EDBt k\u1EF3 c\u0169/tr\u00F9ng kh\u00F4ng c\u00F2n d\u00F9ng.`,
-                React.createElement("button", { type: "button", onClick: () => setShowFileList(!showFileList), style: { padding: "4px 10px", background: "transparent", border: `1px solid ${COLORS.line}`, borderRadius: 6, fontSize: 12, color: COLORS.pine, fontWeight: 600 } }, showFileList ? "\u1EA8n danh s\u00E1ch" : "Qu\u1EA3n l\u00FD k\u1EF3"))),
+                React.createElement("button", { type: "button", onClick: () => setShowFileList(!showFileList), style: { padding: "4px 10px", background: "transparent", border: `1px solid ${COLORS.line}`, borderRadius: 6, fontSize: 12, color: COLORS.pine, fontWeight: 600 } }, showFileList ? "\u1EA8n danh s\u00E1ch" : "Qu\u1EA3n l\u00FD k\u1EF3"),
+                React.createElement("button", { type: "button", onClick: cleanupApiPeriods, disabled: cleaningApiPeriods, style: { padding: "4px 10px", background: "transparent", border: `1px solid ${COLORS.clay}`, borderRadius: 6, fontSize: 12, color: COLORS.clay, fontWeight: 600 } }, cleaningApiPeriods ? "\u0110ang d\u1ECDn..." : "D\u1ECDn k\u1EF3 API tr\u00F9ng l\u1EB7p"))),
             showFileList && (React.createElement("div", { style: { border: `1px solid ${COLORS.line}`, borderRadius: 10, overflow: "hidden", marginBottom: 20, maxHeight: 280, overflowY: "auto" } },
                 React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
                     React.createElement("thead", null, React.createElement("tr", { style: { background: COLORS.card } },
